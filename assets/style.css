@@ -1,0 +1,240 @@
+/* assets/style.css */
+
+/* Google Font for modern clean cinephile typography */
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+html,
+body,
+[class*="css"] {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.main-title {
+    font-size: 3.6rem !important;
+    font-weight: 800;
+    text-align: center;
+    background: linear-gradient(135deg, #FF8000 0%, #00E054 50%, #40BCF4 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 0px;
+    padding-top: 1rem;
+    letter-spacing: -1px;
+}
+
+.sub-title {
+    text-align: center;
+    font-size: 1.15rem;
+    color: #9AB;
+    margin-bottom: 2.5rem;
+    font-weight: 400;
+}
+
+/* Nasconde la sidebar nella landing page */
+.hide-sidebar [data-testid="collapsedControl"] {
+    display: none;
+}
+
+.hide-sidebar [data-testid="stSidebar"] {
+    display: none;
+}
+
+/* Custom Card Containers */
+.lb-card {
+    background: #1F252C;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    padding: 1.25rem;
+    margin-bottom: 1rem;
+    transition: transform 0.2s ease, border-color 0.2s ease;
+}
+
+.lb-card:hover {
+    border-color: rgba(255, 128, 0, 0.4);
+    transform: translateY(-2px);
+}
+
+.lb-stat-number {
+    font-size: 2.2rem;
+    font-weight: 800;
+    color: #FF8000;
+    line-height: 1.1;
+}
+
+.lb-stat-label {
+    font-size: 0.85rem;
+    color: #8C98A4;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    margin-top: 4px;
+}
+
+/* Genre & Tag badges */
+.genre-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 16px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    background-color: rgba(64, 188, 244, 0.15);
+    color: #40BCF4;
+    border: 1px solid rgba(64, 188, 244, 0.3);
+    margin: 2px 4px 2px 0;
+}
+
+.director-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 16px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    background-color: rgba(0, 224, 84, 0.15);
+    color: #00E054;
+    border: 1px solid rgba(0, 224, 84, 0.3);
+    margin: 2px 4px 2px 0;
+}
+
+.rating-badge {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    font-weight: 700;
+    background: #FF8000;
+    color: #14181C;
+}
+
+/* Callout Banner */
+.cta-banner {
+    background: linear-gradient(135deg, rgba(255, 128, 0, 0.15) 0%, rgba(31, 37, 44, 0.9) 100%);
+    border: 1px solid rgba(255, 128, 0, 0.35);
+    border-radius: 14px;
+    padding: 1.5rem;
+    margin: 1.5rem 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+/* Streamlit Tabs Polish */
+button[data-baseweb="tab"] {
+    font-weight: 600 !important;
+    font-size: 0.95rem !important;
+}
+
+/* Metric card enhancements */
+[data-testid="stMetric"] {
+    background-color: #1F252C;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    padding: 12px 18px;
+}
+
+/* Sagas & Cinematic Universes */
+.saga-card {
+    background: #1F252C;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1.25rem;
+    position: relative;
+    overflow: hidden;
+    transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.saga-card:hover {
+    border-color: rgba(0, 224, 84, 0.4);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    transform: translateY(-2px);
+}
+
+.saga-card-completed {
+    background: linear-gradient(135deg, rgba(0, 224, 84, 0.06) 0%, #1F252C 100%);
+    border: 1px solid rgba(0, 224, 84, 0.35);
+}
+
+.saga-card-completed:hover {
+    border-color: #00E054;
+    box-shadow: 0 8px 28px rgba(0, 224, 84, 0.15);
+}
+
+.saga-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1rem;
+    margin-bottom: 0.75rem;
+}
+
+.saga-title {
+    font-size: 1.35rem;
+    font-weight: 700;
+    color: #EEF2F6;
+    margin: 0;
+    line-height: 1.2;
+}
+
+.saga-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+}
+
+.saga-badge-complete {
+    background: rgba(0, 224, 84, 0.18);
+    color: #00E054;
+    border: 1px solid rgba(0, 224, 84, 0.4);
+}
+
+.saga-badge-progress {
+    background: rgba(255, 128, 0, 0.18);
+    color: #FF8000;
+    border: 1px solid rgba(255, 128, 0, 0.4);
+}
+
+.saga-progress-track {
+    width: 100%;
+    height: 10px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    overflow: hidden;
+    margin: 10px 0 6px 0;
+}
+
+.saga-progress-fill {
+    height: 100%;
+    border-radius: 6px;
+    background: linear-gradient(90deg, #FF8000 0%, #00E054 100%);
+    transition: width 0.4s ease;
+}
+
+.saga-progress-fill-complete {
+    background: #00E054;
+    box-shadow: 0 0 12px rgba(0, 224, 84, 0.5);
+}
+
+/* Physical Collection Badges */
+.physical-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 9px;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    background: rgba(168, 85, 247, 0.18);
+    color: #C084FC;
+    border: 1px solid rgba(168, 85, 247, 0.35);
+}
+
+.physical-kpi-card {
+    background: linear-gradient(135deg, rgba(168, 85, 247, 0.12) 0%, #1F252C 100%);
+    border: 1px solid rgba(168, 85, 247, 0.35);
+    border-radius: 12px;
+    padding: 1.25rem;
+    margin-bottom: 1.25rem;
+}
