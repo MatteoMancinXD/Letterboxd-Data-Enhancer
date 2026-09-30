@@ -9,8 +9,6 @@ Transform your Letterboxd diary and watchlist into rich visual insights, track c
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> 🚀 **Try the Live App:** [Open Letterboxd Enhancer on Streamlit Cloud](https://share.streamlit.io) *(no local installation required)*
-
 ---
 
 ## ✨ Features
