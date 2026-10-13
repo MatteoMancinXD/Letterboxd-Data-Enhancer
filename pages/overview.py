@@ -11,6 +11,8 @@ def load_css(file_name):
 
 load_css("assets/style.css")
 
+from services.importer_service import load_uploaded_files, ZipSecurityError
+
 # Data paths
 DATA_DIR = "data"
 ENRICHED_FILE = os.path.join(DATA_DIR, "letterboxd_enriched.parquet")
@@ -33,31 +35,22 @@ else:
     
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        uploaded_files = st.file_uploader(t("landing_upload_label"), type=['csv'], accept_multiple_files=True, label_visibility="collapsed")
+        uploaded_files = st.file_uploader(t("landing_upload_label_all"), type=['csv', 'zip'], accept_multiple_files=True, label_visibility="collapsed")
         if uploaded_files:
-            dfs = []
-            for uf in uploaded_files:
-                try:
-                    temp_df = pd.read_csv(uf)
-                    dfs.append((uf.name.lower(), temp_df))
-                except Exception:
-                    pass
-            if dfs:
-                if len(dfs) == 1:
-                    df_up = dfs[0][1]
+            try:
+                combined_df, info = load_uploaded_files(uploaded_files)
+                if not combined_df.empty:
+                    st.session_state['raw_data'] = combined_df
+                    st.session_state['data_loaded'] = True
+                    st.session_state['upload_info'] = info
+                    st.success(t("landing_uploaded_success"))
+                    st.switch_page("pages/data_manager.py")
                 else:
-                    w_df = next((d for n, d in dfs if 'watched' in n or 'Rating' not in d.columns), None)
-                    r_df = next((d for n, d in dfs if 'rating' in n or 'Rating' in d.columns), None)
-                    if w_df is not None and r_df is not None:
-                        keys = [c for c in ['Name', 'Year'] if c in w_df.columns and c in r_df.columns] or ['Name']
-                        r_sub = r_df[keys + ['Rating']].drop_duplicates(subset=keys)
-                        df_up = pd.merge(w_df, r_sub, on=keys, how='left')
-                    else:
-                        df_up = pd.concat([d for _, d in dfs], ignore_index=True)
-                st.session_state['raw_data'] = df_up
-                st.session_state['data_loaded'] = True
-                st.success(t("landing_uploaded_success"))
-                st.switch_page("pages/data_manager.py")
+                    st.error("No valid movie records found in the uploaded files.")
+            except ZipSecurityError as zse:
+                st.error(f"🛡️ {t('importer_zip_security_error')}: {zse}")
+            except Exception as e:
+                st.error(f"Error reading upload: {e}")
         
         st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
         if st.button(f"➕ {t('nav_add_movie')} Manually", use_container_width=True):

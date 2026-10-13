@@ -23,6 +23,15 @@ Transform your Letterboxd diary and watchlist into rich visual insights, track c
   - Interactive ownership toggles that persist directly into your database.
   - Live physical ownership counter and percentage tracker with dedicated filters.
 - ➕ **Add & Search Movies via TMDb**: Quick search interface to enrich and log new films directly with automatic metadata fetching (directors, runtime, cast, release date, poster art, overview).
+- 🔄 **Watched List Smart Update & Synchronization**:
+  - Update your movie collection anytime by re-uploading an updated Letterboxd export (`.zip` or `.csv`).
+  - Automatically compares against your existing enriched database:
+    - ➖ **Deleted films** are removed from the parquet file.
+    - ➕ **Newly added films** are fetched and enriched from TMDb.
+    - 🔁 **Retained films** preserve their physical ownership flags, existing TMDb metadata, and receive updated ratings/dates.
+- 📦 **Direct Letterboxd ZIP Export Upload & Security Engine**:
+  - Drag-and-drop the `.zip` archive exported directly from your Letterboxd account.
+  - Multi-layered security verification prevents **Zip Bombs** (expansion ratio & size limits), **Zip Slack / trailing payload injection**, **Zip Slip / Path Traversal**, polyglot headers, and unauthorized executable formats.
 - 🌐 **Bilingual Support**: Instant toggle between **English** and **Italian**.
 - 🎨 **Sleek Cinephile Theme**: Bespoke dark aesthetic inspired by Letterboxd's visual identity.
 
