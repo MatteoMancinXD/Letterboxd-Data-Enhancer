@@ -9,6 +9,7 @@ Features:
 - Non-destructive synchronization: preserves existing TMDb metadata and physical copy status,
   fetches TMDb metadata only for newly added films, and removes deleted films.
 """
+from __future__ import annotations
 
 import io
 import struct

@@ -437,6 +437,54 @@ with tab_dirs:
                 if not top_duos.empty:
                     st.dataframe(top_duos, use_container_width=True, height=240)
 
+            st.divider()
+
+            # Actor Deep Dive & Filmography Search
+            st.subheader(f"🔍 {t('tab1_actor_deep_dive')}")
+            all_actors_sorted = sorted(act_summary['Actor'].unique())
+            selected_actor = st.selectbox(
+                t("tab1_select_actor"),
+                all_actors_sorted,
+                index=0,
+                key="select_actor_deep_dive"
+            )
+
+            if selected_actor:
+                act_movies = filtered_df[filtered_df['clean_actors'].apply(lambda al: selected_actor in al)].copy()
+                a_count = len(act_movies)
+                a_avg = act_movies['primary_rating_10'].mean() if act_movies['primary_rating_10'].notna().any() else "N/A"
+                a_genres = list(set([g for sub in act_movies['clean_genres'] for g in sub]))
+
+                col_add1, col_add2, col_add3 = st.columns(3)
+                with col_add1:
+                    st.metric(t("tab1_films_in_diary"), f"{a_count}")
+                with col_add2:
+                    st.metric("Avg Rating (1-10)", f"{a_avg:.2f}" if isinstance(a_avg, float) else a_avg)
+                with col_add3:
+                    st.metric(t("tab1_genres_explored"), f"{len(a_genres)}")
+
+                if a_genres:
+                    st.markdown(f"**Genres:** " + " ".join([f"<span class='genre-badge'>{g}</span>" for g in a_genres]), unsafe_allow_html=True)
+
+                act_movies['Director'] = act_movies['clean_directors'].apply(
+                    lambda dl: ", ".join(dl) if dl else "N/A"
+                )
+
+                show_cols = []
+                for c in ['Name', 'Title']:
+                    if c in act_movies.columns:
+                        show_cols.append(c)
+                        break
+                show_cols.append('Director')
+                for c in ['Year', 'Rating', 'tmdb_rating', 'Letterboxd URI']:
+                    if c in act_movies.columns:
+                        show_cols.append(c)
+
+                st.dataframe(
+                    act_movies[show_cols].sort_values(by='Year', ascending=True),
+                    use_container_width=True
+                )
+
 # ==============================================================================
 # TAB 2: GENRES & STYLES
 # ==============================================================================

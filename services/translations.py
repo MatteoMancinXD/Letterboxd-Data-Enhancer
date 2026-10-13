@@ -171,6 +171,8 @@ TRANSLATIONS = {
         "tab1_top_actors": "Top 20 Most Watched Actors",
         "tab1_collabs": "Golden Collaborations (Director & Actor)",
         "tab1_actor_duos": "Top Actor Duos (Co-stars)",
+        "tab1_actor_deep_dive": "Actor Deep-Dive & Filmography",
+        "tab1_select_actor": "Select or type an actor to analyze in detail:",
         
         # Tab 2
         "tab2_genre_freq": "Genre Frequency & Share",
@@ -443,6 +445,8 @@ TRANSLATIONS = {
         "tab1_top_actors": "I 20 Attori Più Visti",
         "tab1_collabs": "Collaborazioni d'Oro (Regista & Attore)",
         "tab1_actor_duos": "Coppie di Attori Più Frequenti",
+        "tab1_actor_deep_dive": "Deep-Dive Attore & Filmografia",
+        "tab1_select_actor": "Seleziona o digita un attore da analizzare in dettaglio:",
         
         # Tab 2
         "tab2_genre_freq": "Frequenza dei Generi",

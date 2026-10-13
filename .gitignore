@@ -19,3 +19,8 @@ venv/
 Thumbs.db
 .vscode/
 .idea/
+
+# Local data & databases
+data/*.parquet*
+*.parquet
+*.bak
