@@ -5,12 +5,7 @@ import numpy as np
 import os
 from services.translations import t
 
-def load_css(file_name):
-    if os.path.exists(file_name):
-        with open(file_name) as f:
-            st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
 
-load_css("assets/style.css")
 
 DATA_DIR = "data"
 ENRICHED_FILE = os.path.join(DATA_DIR, "letterboxd_enriched.parquet")
@@ -32,7 +27,7 @@ if 'physical_copy' not in df.columns:
     df['physical_copy'] = False
 df['physical_copy'] = df['physical_copy'].fillna(False).astype(bool)
 
-st.title(f"🎬 {t('ps_title')}")
+st.title(f"{t('ps_title')}")
 st.markdown(f"<p class='sub-title' style='text-align: left; margin-bottom: 1.5rem;'>{t('ps_subtitle')}</p>", unsafe_allow_html=True)
 
 # 1. Summary KPIs with Physical Collection
@@ -60,11 +55,11 @@ with col5:
 phys_banner_html = (
     f"<div class='physical-kpi-card'>"
     f"<div style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;'>"
-    f"<span style='color: #C084FC; font-weight: 700; font-size: 0.95rem;'>💿 {t('ps_kpi_physical')}: <b>{physical_count}</b> of <b>{total_count}</b> films</span>"
-    f"<b style='color: #00E054; font-size: 1.05rem;'>{physical_pct:.1f}% in Physical Media</b>"
+    f"<span style='color: #C79AFF; font-weight: 700; font-size: 0.95rem;'>💿 {t('ps_kpi_physical')}: <b>{physical_count}</b> of <b>{total_count}</b> films</span>"
+    f"<b style='color: #00E676; font-size: 1.05rem;'>{physical_pct:.1f}% in Physical Media</b>"
     f"</div>"
     f"<div class='saga-progress-track'>"
-    f"<div style='height: 100%; border-radius: 6px; width: {physical_pct}%; background: linear-gradient(90deg, #A855F7 0%, #00E054 100%);'></div>"
+    f"<div style='height: 100%; border-radius: 6px; width: {physical_pct}%; background: linear-gradient(90deg, #A855F7 0%, #00E676 100%);'></div>"
     f"</div>"
     f"</div>"
 )
@@ -110,7 +105,7 @@ if selected_option and selected_option in film_index_map:
         else:
             st.markdown(
                 """
-                <div style="width: 180px; height: 260px; background: #1F252C; border-radius: 8px; display: flex; align-items: center; justify-content: center; border: 1px solid rgba(255,255,255,0.1);">
+                <div style="width: 180px; height: 260px; background: #192231; border-radius: 8px; display: flex; align-items: center; justify-content: center; border: 1px solid rgba(255,255,255,0.1);">
                     <span style="color: #9AB; font-size: 0.9rem;">No Poster</span>
                 </div>
                 """,
@@ -130,7 +125,7 @@ if selected_option and selected_option in film_index_map:
         if pd.notna(curr_val):
             status_badges.append(f"<span class='rating-badge'>{curr_val} ★</span>")
         else:
-            status_badges.append("<span style='color: #FF8000; font-weight: bold;'>⚠️ Unrated</span>")
+            status_badges.append("<span style='color: #FF9B38; font-weight: bold;'>⚠️ Unrated</span>")
             
         if curr_phys:
             status_badges.append("<span class='physical-badge'>💿 Physical Copy in Collection</span>")
@@ -276,7 +271,7 @@ editor_data['Directors'] = filtered_table['directors'].apply(lambda l: ", ".join
 st.markdown(
     f"""
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-        <span style="color: #EEF2F6; font-size: 0.95rem;">
+        <span style="color: #F4F7FC; font-size: 0.95rem;">
             Showing <b>{len(editor_data)}</b> films — <i>💡 You can toggle the <b>Physical Copy</b> checkbox directly in the table below!</i>
         </span>
     </div>

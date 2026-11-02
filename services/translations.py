@@ -74,8 +74,8 @@ TRANSLATIONS = {
         "add_already_exists": "Notice: This film is already in your library. Added another diary entry.",
         
         # Settings & Reset
-        "settings_title": "Settings & Database Management",
-        "settings_subtitle": "Manage your local enriched dataset, view database health, or reset your history.",
+        "settings_title": "Settings & Reset",
+        "settings_subtitle": "Configure TMDb access and application preferences, or reset your history.",
         "db_health_title": "Database Health & Telemetry",
         "db_records": "Total Records",
         "db_file_size": "Parquet File Size",
@@ -348,8 +348,8 @@ TRANSLATIONS = {
         "add_already_exists": "Nota: Questo film è già presente nella tua libreria. Aggiunta una nuova voce al diario.",
         
         # Settings & Reset
-        "settings_title": "Impostazioni & Gestione Database",
-        "settings_subtitle": "Gestisci il dataset locale arricchito, monitora lo stato dei dati o reimposta la cronologia.",
+        "settings_title": "Impostazioni e reset",
+        "settings_subtitle": "Configura l’accesso a TMDb e le preferenze dell’applicazione, o reimposta la cronologia.",
         "db_health_title": "Stato e Integrità del Database",
         "db_records": "Record Totali",
         "db_file_size": "Dimensione File Parquet",
@@ -577,3 +577,8 @@ def render_language_selector(sidebar=True):
     if new_lang != current:
         st.session_state["lang"] = new_lang
         st.rerun()
+
+
+def localized(english, italian):
+    """Localize small UI messages alongside the shared translation catalog."""
+    return italian if st.session_state.get('lang', 'en') == 'it' else english

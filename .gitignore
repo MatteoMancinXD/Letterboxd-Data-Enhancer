@@ -22,5 +22,7 @@ Thumbs.db
 
 # Local data & databases
 data/*.parquet*
+data/tmdb_collections_cache.json
+data/curated_sagas_cache.json
 *.parquet
 *.bak

@@ -1,15 +1,18 @@
 # services/sagas_service.py
 import re
+import datetime
+import tempfile
 import unicodedata
 import json
 import os
 import requests
 import pandas as pd
 import numpy as np
-from services.tmbd_service import get_tmdb_api_key
+from services.tmbd_service import get_tmdb_api_key, fetch_movie_metadata, fetch_movie_details_by_id
 
 DATA_DIR = "data"
 CACHE_FILE = os.path.join(DATA_DIR, "tmdb_collections_cache.json")
+CURATED_CACHE_FILE = os.path.join(DATA_DIR, "curated_sagas_cache.json")
 
 def normalize_title(title):
     """
@@ -660,6 +663,10 @@ CURATED_SAGAS = [
     }
 ]
 
+from services.sagas_catalog import EXTRA_SAGAS
+CURATED_SAGAS.extend(EXTRA_SAGAS)
+
+
 def build_user_library_lookup(df):
     """
     Creates a pre-indexed fast lookup structure of user's watched movies
@@ -685,6 +692,7 @@ def build_user_library_lookup(df):
         
         lookup.append({
             "idx": idx,
+            "tmdb_id": int(row["tmdb_id"]) if pd.notna(row.get("tmdb_id")) else None,
             "title": str(title),
             "norm": normalize_title(title),
             "year": year,
@@ -698,166 +706,181 @@ def build_user_library_lookup(df):
     return lookup
 
 def match_film(film_def, user_lookup):
-    """
-    Attempts to match a canonical saga film against the user's logged films.
-    Uses exact normalized comparison, alias checks, and release year tolerance.
-    """
-    target_norm = normalize_title(film_def['title'])
-    target_year = film_def.get('year')
-    aliases_norm = [normalize_title(a) for a in film_def.get('aliases', []) if a]
-    
-    # 1. Exact title match with matching year
-    for item in user_lookup:
-        if (item['norm'] == target_norm or item['norm'] in aliases_norm):
-            if target_year is None or item['year'] is None or abs(item['year'] - target_year) <= 1:
-                return item
-                
-    # 2. Exact title match regardless of year
-    for item in user_lookup:
-        if item['norm'] == target_norm or item['norm'] in aliases_norm:
-            return item
-            
-    # 3. Year match + high confidence containment
-    if target_year is not None:
+    """ID first, then exact title/alias and year (never match a different remake)."""
+    movie_id = film_def.get('tmdb_id')
+    if movie_id:
         for item in user_lookup:
-            if item['year'] is not None and abs(item['year'] - target_year) <= 1:
-                # If target title is contained inside user title or vice versa
-                if len(target_norm) >= 6 and (target_norm in item['norm'] or item['norm'] in target_norm):
-                    return item
-                for a_norm in aliases_norm:
-                    if len(a_norm) >= 6 and (a_norm in item['norm'] or item['norm'] in a_norm):
-                        return item
-                        
+            if item.get('tmdb_id') == movie_id:
+                return item
+    names = {normalize_title(film_def['title'])}
+    names.update(normalize_title(a) for a in film_def.get('aliases', []) if a)
+    candidates = [item for item in user_lookup if item['norm'] in names]
+    year = film_def.get('year')
+    exact = [item for item in candidates if item['year'] == year]
+    if len(exact) == 1:
+        return exact[0]
+    if len(candidates) == 1 and (year is None or candidates[0]['year'] is None):
+        return candidates[0]
     return None
 
-def compute_sagas_progress(df, include_tmdb_collections=True):
-    """
-    Main computational engine:
-    Evaluates all curated sagas and dynamic collections against the user's diary.
-    Returns:
-    - started_sagas: list of dicts with progress > 0 and < 100%
-    - completed_sagas: list of dicts with progress == 100%
-    - unstarted_sagas: list of dicts with progress == 0%
-    - kpis: summary metrics
-    """
-    user_lookup = build_user_library_lookup(df)
-    
-    # Pool of all sagas: Curated + Cached TMDB Collections
-    all_sagas = list(CURATED_SAGAS)
-    
-    # Load dynamic collections from cache if available
-    if include_tmdb_collections and os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                cached_cols = json.load(f)
-                curated_ids = {s['id'] for s in all_sagas}
-                for c in cached_cols:
-                    if c.get('id') not in curated_ids:
-                        all_sagas.append(c)
-        except Exception:
-            pass
 
-    started_sagas = []
-    completed_sagas = []
-    unstarted_sagas = []
-    
+def read_cache(path):
+    try:
+        with open(path, encoding='utf-8') as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return []
+
+
+def write_cache(path, entries):
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=directory, suffix='.json')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(entries, handle, ensure_ascii=False, indent=2)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+
+
+def film_key(film):
+    return normalize_title(film['title']), film.get('year')
+
+
+def saga_catalog(include_tmdb_collections=True):
+    """Merge fresh TMDb metadata and suppress duplicate standalone sagas.
+
+    Universes retain their editorial membership: a TMDb collection describes a
+    series, not necessarily an entire cinematic universe.
+    """
+    overrides = {s['id']: s for s in read_cache(CURATED_CACHE_FILE)}
+    curated = []
+    for original in CURATED_SAGAS:
+        saga = dict(original)
+        cached = overrides.get(saga['id'], {})
+        details = {film_key(f): f for f in cached.get('films', [])}
+        saga['films'] = [{**f, **details.get(film_key(f), {})} for f in saga['films']]
+        known = {film_key(f) for f in saga['films']}
+        saga['films'].extend(dict(f) for f in cached.get('films', []) if film_key(f) not in known)
+        saga['updated_at'] = cached.get('updated_at')
+        saga['source'] = 'curated'
+        curated.append(saga)
+    if not include_tmdb_collections:
+        return curated
+    collections = read_cache(CACHE_FILE)
+    # Transfer available film details even when the containing universe stays curated.
+    movie_details = {film_key(f): f for c in collections for f in c.get('films', [])}
+    for saga in curated:
+        for film in saga['films']:
+            details = movie_details.get(film_key(film), {})
+            for field in ('tmdb_id', 'poster_path', 'tmdb_rating', 'vote_count', 'release_date'):
+                if details.get(field) is not None:
+                    film[field] = details[field]
+    result = list(curated)
+    for collection in collections:
+        collection = dict(collection, source='tmdb')
+        keys = {film_key(f) for f in collection.get('films', [])}
+        if not keys:
+            continue
+        duplicate = None
+        for saga in curated:
+            curated_keys = {film_key(f) for f in saga['films']}
+            # Equal catalogs, or TMDb adds sequels to an existing standalone saga.
+            if saga.get('category') == 'saga' and len(curated_keys) >= 2 and curated_keys <= keys:
+                duplicate = saga
+                break
+        if duplicate is not None and duplicate in result:
+            replacement = dict(collection, id=duplicate['id'], name=duplicate['name'])
+            result[result.index(duplicate)] = replacement
+        else:
+            result.append(collection)
+    return result
+
+
+def release_state(film, today):
+    release = film.get('release_date')
+    if release:
+        try:
+            return 'released' if datetime.date.fromisoformat(release) <= today else 'upcoming'
+        except ValueError:
+            pass
+    if 'release_date' in film:
+        return 'unknown'
+    if film.get('upcoming'):
+        return 'unknown' if (film.get('year') or today.year) <= today.year else 'upcoming'
+    if film.get('year') and film['year'] > today.year:
+        return 'upcoming'
+    return 'released'
+
+
+def compute_sagas_progress(df, include_tmdb_collections=True, today=None):
+    today = today or datetime.date.today()
+    lookup = build_user_library_lookup(df)
+    all_sagas = saga_catalog(include_tmdb_collections)
+    groups = {'started_sagas': [], 'completed_sagas': [], 'unstarted_sagas': []}
+    unique_watched, unique_physical = set(), set()
     for saga in all_sagas:
-        films = saga.get('films', [])
+        films = []
+        seen = set()
+        for film in saga.get('films', []):
+            identity = ('id', film['tmdb_id']) if film.get('tmdb_id') else film_key(film)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            item = dict(film)
+            item['release_state'] = release_state(item, today)
+            item['upcoming'] = item['release_state'] != 'released'
+            match = match_film(item, lookup)
+            item.update(watched=match is not None, user_rating=None, has_physical=False)
+            if match:
+                item['user_rating'] = match['user_rating']
+                item['has_physical'] = match['has_physical']
+                item['poster_path'] = item.get('poster_path') or match['poster_path']
+                item['tmdb_rating'] = item.get('tmdb_rating') or match['tmdb_rating']
+                item['runtime'] = match['runtime']
+                item['diary_title'] = match['title']
+                identity = match.get('tmdb_id') or (match['norm'], match['year'])
+                unique_watched.add(identity)
+                if item['has_physical']:
+                    unique_physical.add(identity)
+            films.append(item)
         if not films:
             continue
-            
-        matched_films = []
-        unmatched_films = []
-        
-        # We only count released films for completion calculations (upcoming films don't block 100%)
-        released_film_count = sum(1 for f in films if not f.get('upcoming', False))
-        if released_film_count == 0:
-            released_film_count = len(films)
-            
-        ratings_recorded = []
-        physical_count = 0
-        
-        for f in films:
-            match = match_film(f, user_lookup)
-            f_copy = dict(f)
-            if match:
-                f_copy['watched'] = True
-                f_copy['user_rating'] = match['user_rating']
-                f_copy['has_physical'] = match['has_physical']
-                f_copy['poster_path'] = match['poster_path'] or f.get('poster_path')
-                f_copy['tmdb_rating'] = match['tmdb_rating']
-                f_copy['runtime'] = match['runtime']
-                f_copy['diary_title'] = match['title']
-                matched_films.append(f_copy)
-                
-                if match['user_rating'] is not None:
-                    ratings_recorded.append(float(match['user_rating']))
-                if match['has_physical']:
-                    physical_count += 1
-            else:
-                f_copy['watched'] = False
-                f_copy['user_rating'] = None
-                f_copy['has_physical'] = False
-                unmatched_films.append(f_copy)
-                
-        watched_count = len(matched_films)
-        total_films = len(films)
-        
-        pct = (watched_count / released_film_count * 100) if released_film_count > 0 else 0.0
-        pct = min(100.0, pct)
-        
-        avg_rating = np.mean(ratings_recorded) if ratings_recorded else None
-        
-        saga_summary = {
-            "id": saga['id'],
-            "name": saga['name'],
-            "category": saga.get('category', 'saga'),
-            "tag": saga.get('tag', 'Film Saga'),
-            "badge_color": saga.get('badge_color', '#FF8000'),
-            "backdrop_url": saga.get('backdrop_url'),
-            "poster_url": saga.get('poster_url'),
-            "description": saga.get('description', ''),
-            "total_films": total_films,
-            "released_films": released_film_count,
-            "watched_count": watched_count,
-            "remaining_count": total_films - watched_count,
-            "progress_pct": round(pct, 1),
-            "is_complete": (pct >= 100.0 or watched_count >= released_film_count),
-            "matched_films": matched_films,
-            "unmatched_films": unmatched_films,
-            "all_films": matched_films + unmatched_films,
-            "avg_user_rating": round(float(avg_rating), 2) if avg_rating is not None else None,
-            "ratings_count": len(ratings_recorded),
-            "physical_count": physical_count
-        }
-        
-        if saga_summary['is_complete']:
-            completed_sagas.append(saga_summary)
-        elif watched_count > 0:
-            started_sagas.append(saga_summary)
-        else:
-            unstarted_sagas.append(saga_summary)
-            
-    # Sort: started by highest progress %, completed by film count or rating
-    started_sagas.sort(key=by_progress_desc)
-    completed_sagas.sort(key=by_films_desc)
-    
-    total_franchise_films_watched = sum(s['watched_count'] for s in started_sagas + completed_sagas)
-    
-    kpis = {
-        "total_sagas_tracked": len(all_sagas),
-        "started_count": len(started_sagas),
-        "completed_count": len(completed_sagas),
-        "unstarted_count": len(unstarted_sagas),
-        "total_franchise_films_watched": total_franchise_films_watched
-    }
-    
-    return {
-        "started_sagas": started_sagas,
-        "completed_sagas": completed_sagas,
-        "unstarted_sagas": unstarted_sagas,
-        "kpis": kpis
-    }
+        released = [f for f in films if f['release_state'] == 'released']
+        watched = [f for f in films if f['watched']]
+        released_watched = [f for f in released if f['watched']]
+        ratings = [float(f['user_rating']) for f in watched if pd.notna(f['user_rating'])]
+        scores = [float(f['tmdb_rating']) for f in released
+                  if pd.notna(f.get('tmdb_rating')) and float(f['tmdb_rating']) > 0
+                  and (f.get('vote_count') is None or f['vote_count'] > 0)]
+        # Taste gap uses the same films on both scales (personal rating × 2).
+        pairs = [float(f['user_rating']) * 2 - float(f['tmdb_rating']) for f in released_watched
+                 if pd.notna(f['user_rating']) and pd.notna(f.get('tmdb_rating')) and f['tmdb_rating'] > 0]
+        pct = len(released_watched) / len(released) * 100 if released else 0.0
+        summary = dict(saga, total_films=len(films), released_films=len(released),
+            watched_count=len(watched), remaining_count=len(released) - len(released_watched),
+            upcoming_count=sum(f['release_state'] == 'upcoming' for f in films),
+            unknown_release_count=sum(f['release_state'] == 'unknown' for f in films),
+            progress_pct=round(pct, 1), is_complete=bool(released) and len(released_watched) == len(released),
+            matched_films=watched, unmatched_films=[f for f in films if not f['watched']],
+            all_films=sorted(films, key=lambda f: (f.get('release_date') or str(f.get('year') or 9999), f['title'])),
+            avg_user_rating=round(float(np.mean(ratings)), 2) if ratings else None,
+            avg_tmdb_rating=round(float(np.mean(scores)), 2) if scores else None,
+            taste_gap=round(float(np.mean(pairs)), 2) if pairs else None,
+            comparison_count=len(pairs), ratings_count=len(ratings), tmdb_ratings_count=len(scores),
+            physical_count=sum(f['has_physical'] for f in watched))
+        group = 'completed_sagas' if summary['is_complete'] else 'started_sagas' if watched else 'unstarted_sagas'
+        groups[group].append(summary)
+    groups['started_sagas'].sort(key=by_progress_desc)
+    groups['completed_sagas'].sort(key=by_films_desc)
+    groups['kpis'] = dict(total_sagas_tracked=sum(len(v) for v in groups.values()),
+        started_count=len(groups['started_sagas']), completed_count=len(groups['completed_sagas']),
+        unstarted_count=len(groups['unstarted_sagas']), total_franchise_films_watched=len(unique_watched),
+        total_physical_films=len(unique_physical))
+    return groups
+
 
 def by_progress_desc(s):
     return -s['progress_pct'], -s['watched_count']
@@ -865,120 +888,113 @@ def by_progress_desc(s):
 def by_films_desc(s):
     return -s['total_films'], s['name']
 
-def scan_and_cache_tmdb_collections(df, max_movies=50, progress_callback=None):
-    """
-    Scans the user's movies against TMDB API to discover any collections
-    associated with their movies (e.g., Ice Age, Kung Fu Panda, Dune, etc.)
-    and persists them into the local cache file.
-    """
+def scan_and_cache_tmdb_collections(df, max_movies=None, progress_callback=None):
+    """Discover AND refresh collections, once each per scan, across the library."""
     key = get_tmdb_api_key()
-    if not key or df is None or df.empty:
-        return 0
-        
-    os.makedirs(DATA_DIR, exist_ok=True)
-    existing_cache = {}
-    if os.path.exists(CACHE_FILE):
+    if not key:
+        raise ValueError('Configure a TMDb API key in Settings / Impostazioni.')
+    existing = {c['id']: c for c in read_cache(CACHE_FILE)}
+    visited = set()
+    report = dict(scanned=0, new=0, refreshed=0, failed=0, unmatched=0)
+    rows = df if max_movies is None else df.head(max_movies)
+    def request(path, **params):
+        response = requests.get(f'https://api.themoviedb.org/3/{path}',
+                                params=dict(api_key=key, **params), timeout=10)
+        response.raise_for_status()
+        return response.json()
+    for _, row in rows.iterrows():
         try:
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                for c in json.load(f):
-                    existing_cache[c['id']] = c
-        except Exception:
-            pass
-            
-    curated_names = {s['name'].lower() for s in CURATED_SAGAS}
-    curated_ids = {s['id'] for s in CURATED_SAGAS}
-    
-    new_found = 0
-    total_rows = min(len(df), max_movies)
-    
-    for idx, (_, row) in enumerate(df.head(max_movies).iterrows()):
+            collection_id = row.get('collection_id')
+            if pd.isna(collection_id):
+                movie_id = row.get('tmdb_id')
+                if pd.isna(movie_id):
+                    title = row.get('Name') if pd.notna(row.get('Name')) else row.get('Title')
+                    year = row.get('Year')
+                    params = {'query': title}
+                    if pd.notna(year) and str(year).replace('.0', '').isdigit():
+                        params['year'] = int(float(year))
+                    candidates = request('search/movie', **params).get('results', [])
+                    names = {normalize_title(title)}
+                    candidates = [m for m in candidates if names & {normalize_title(m.get('title')), normalize_title(m.get('original_title'))}
+                                  and ('year' not in params or (m.get('release_date') or '').startswith(str(params['year'])))]
+                    if len(candidates) != 1:
+                        report['unmatched'] += 1
+                        continue
+                    movie_id = candidates[0]['id']
+                details = request(f'movie/{int(movie_id)}')
+                collection_id = (details.get('belongs_to_collection') or {}).get('id')
+            if not collection_id or pd.isna(collection_id):
+                continue
+            collection_id = int(collection_id)
+            if collection_id in visited:
+                continue
+            visited.add(collection_id)
+            details = request(f'collection/{collection_id}')
+            films = []
+            for part in details.get('parts', []):
+                release = part.get('release_date') or ''
+                films.append(dict(title=part.get('title') or part.get('original_title'),
+                    year=int(release[:4]) if release[:4].isdigit() else None,
+                    tmdb_id=part['id'], release_date=release, phase='Part',
+                    aliases=[part['original_title']] if part.get('original_title') else [],
+                    poster_path=part.get('poster_path'), tmdb_rating=part.get('vote_average'),
+                    vote_count=part.get('vote_count')))
+            cache_id = f'tmdb_col_{collection_id}'
+            report['refreshed' if cache_id in existing else 'new'] += 1
+            existing[cache_id] = dict(id=cache_id, name=details.get('name', 'TMDb Collection'),
+                category='saga', tag='TMDb Collection', badge_color='#00A2FF',
+                description=details.get('overview', ''), films=films,
+                updated_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
+        except (requests.RequestException, ValueError, TypeError, KeyError):
+            report['failed'] += 1
+        finally:
+            report['scanned'] += 1
+            if progress_callback:
+                progress_callback(report['scanned'], len(rows))
+    if report['new'] or report['refreshed']:
+        write_cache(CACHE_FILE, list(existing.values()))
+    return report
+
+
+def refresh_curated_saga(saga_id, progress_callback=None):
+    """Refresh known universe members without claiming TMDb defines its canon."""
+    key = get_tmdb_api_key()
+    if not key:
+        raise ValueError('Configure a TMDb API key in Settings / Impostazioni.')
+    saga = next(s for s in saga_catalog(False) if s['id'] == saga_id)
+    films, failed = [], 0
+    for index, film in enumerate(saga['films']):
+        movie_id = film.get('tmdb_id')
+        meta = (fetch_movie_details_by_id(movie_id, key) if movie_id
+                else fetch_movie_metadata(film['title'], film.get('year'), key))
+        exact_title = meta and normalize_title(meta['title']) in {normalize_title(film['title']), *(normalize_title(a) for a in film.get('aliases', []))}
+        if meta and (movie_id == meta.get('tmdb_id') or (exact_title and meta.get('year') == film.get('year'))):
+            film = dict(film, **{k: meta.get(k) for k in ('tmdb_id', 'tmdb_rating', 'vote_count', 'release_date', 'poster_path')})
+        else:
+            failed += 1
+        films.append(film)
         if progress_callback:
-            progress_callback(idx + 1, total_rows)
-            
-        title = row.get('Name') or row.get('Title')
-        year = row.get('Year')
-        if not title:
-            continue
-            
-        try:
-            search_url = "https://api.themoviedb.org/3/search/movie"
-            params = {"api_key": key, "query": title}
-            if year and str(year).replace('.0','').isdigit():
-                params["year"] = int(year)
-                
-            res = requests.get(search_url, params=params, timeout=4)
-            if res.status_code != 200:
-                continue
-                
-            results = res.json().get("results", [])
-            if not results:
-                continue
-                
-            m_id = results[0]["id"]
-            
-            # Fetch details to get belongs_to_collection
-            m_res = requests.get(f"https://api.themoviedb.org/3/movie/{m_id}", params={"api_key": key}, timeout=4)
-            if m_res.status_code != 200:
-                continue
-                
-            col_info = m_res.json().get("belongs_to_collection")
-            if not col_info or not col_info.get("id"):
-                continue
-                
-            col_id = col_info["id"]
-            cache_id = f"tmdb_col_{col_id}"
-            
-            if cache_id in existing_cache or cache_id in curated_ids:
-                continue
-                
-            # Fetch collection parts
-            c_res = requests.get(f"https://api.themoviedb.org/3/collection/{col_id}", params={"api_key": key}, timeout=4)
-            if c_res.status_code != 200:
-                continue
-                
-            col_data = c_res.json()
-            col_name = col_data.get("name", "Unknown Collection")
-            
-            # Ignore if already represented in curated sagas
-            if any(cn in col_name.lower() for cn in ["star wars", "avengers", "lord of the rings", "harry potter"]):
-                continue
-                
-            parts = col_data.get("parts", [])
-            if len(parts) < 2:
-                continue
-                
-            films_list = []
-            for p in sorted(parts, key=lambda x: x.get("release_date") or ""):
-                r_date = p.get("release_date", "")
-                p_year = int(r_date.split("-")[0]) if r_date and "-" in r_date and r_date.split("-")[0].isdigit() else None
-                films_list.append({
-                    "title": p.get("title") or p.get("original_title"),
-                    "year": p_year,
-                    "phase": "Part",
-                    "aliases": [],
-                    "poster_path": p.get("poster_path")
-                })
-                
-            new_entry = {
-                "id": cache_id,
-                "name": col_name,
-                "category": "saga",
-                "tag": "TMDb Collection",
-                "badge_color": "#00A2FF",
-                "backdrop_url": f"https://image.tmdb.org/t/p/w780{col_data.get('backdrop_path')}" if col_data.get('backdrop_path') else None,
-                "poster_url": f"https://image.tmdb.org/t/p/w300{col_data.get('poster_path')}" if col_data.get('poster_path') else None,
-                "description": col_data.get("overview") or f"Collection of {len(films_list)} films discovered via TMDb.",
-                "films": films_list
-            }
-            
-            existing_cache[cache_id] = new_entry
-            new_found += 1
-            
-        except Exception:
-            continue
-            
-    if new_found > 0:
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(list(existing_cache.values()), f, indent=2)
-            
-    return new_found
+            progress_callback(index + 1, len(saga['films']))
+    if failed < len(films):
+        entries = {s['id']: s for s in read_cache(CURATED_CACHE_FILE)}
+        entries[saga_id] = dict(id=saga_id, films=films, updated_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
+        write_cache(CURATED_CACHE_FILE, list(entries.values()))
+    return dict(updated=len(films) - failed, failed=failed)
+
+
+def add_film_to_curated_saga(saga_id, movie_id, phase=''):
+    """User-selected membership supplements the curated universe catalog."""
+    meta = fetch_movie_details_by_id(movie_id, get_tmdb_api_key())
+    if not meta:
+        raise ValueError('TMDb: movie details unavailable / dettagli film non disponibili.')
+    saga = next(s for s in saga_catalog(False) if s['id'] == saga_id)
+    film = dict(title=meta['title'], year=meta.get('year'), phase=phase,
+                aliases=[], **{k: meta.get(k) for k in
+                ('tmdb_id', 'tmdb_rating', 'vote_count', 'release_date', 'poster_path')})
+    if any(f.get('tmdb_id') == movie_id or film_key(f) == film_key(film) for f in saga['films']):
+        return False
+    entries = {s['id']: s for s in read_cache(CURATED_CACHE_FILE)}
+    entries[saga_id] = dict(id=saga_id, films=saga['films'] + [film],
+                           updated_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
+    write_cache(CURATED_CACHE_FILE, list(entries.values()))
+    return True

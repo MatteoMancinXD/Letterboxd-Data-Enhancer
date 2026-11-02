@@ -1,207 +1,112 @@
-# pages/add_movie.py
-import streamlit as st
-import pandas as pd
-import numpy as np
-import os
+"""Search TMDb and add a film through an immediately visible dialog."""
 import datetime
+import inspect
+import re
+import pandas as pd
+import streamlit as st
 from services.tmbd_service import search_movies, fetch_movie_details_by_id, get_tmdb_api_key
-from services.translations import t
+from services.importer_service import save_dataset
+from services.translations import t, localized as tr
 
-# Custom CSS
-def load_css(file_name):
-    if os.path.exists(file_name):
-        with open(file_name) as f:
-            st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
+ENRICHED_FILE = 'data/letterboxd_enriched.parquet'
+st.title(t('add_movie_title'))
+st.caption(tr('Search for a film, then click its cover to add it to your diary.',
+              'Cerca un film, poi clicca sulla copertina per aggiungerlo al diario.'))
+if 'movie_saved_notice' in st.session_state:
+    st.success(st.session_state.pop('movie_saved_notice'), icon='🎬')
 
-load_css("assets/style.css")
+def close_movie_dialog():
+    st.session_state.pop('movie_dialog_selection', None)
 
-# Dataset paths
-DATA_DIR = "data"
-ENRICHED_FILE = os.path.join(DATA_DIR, "letterboxd_enriched.parquet")
-os.makedirs(DATA_DIR, exist_ok=True)
 
-# Auto-load existing enriched data
-if 'enriched_data' not in st.session_state and os.path.exists(ENRICHED_FILE):
-    st.session_state['enriched_data'] = pd.read_parquet(ENRICHED_FILE)
-    st.session_state['data_loaded'] = True
+dialog_options = {'on_dismiss': close_movie_dialog} if 'on_dismiss' in inspect.signature(st.dialog).parameters else {}
 
-col_am_title, col_am_link = st.columns([3, 1])
-with col_am_title:
-    st.title(f"➕ {t('add_movie_title')}")
-    st.markdown(f"<p class='sub-title' style='text-align: left; margin-bottom: 1.5rem;'>{t('add_movie_subtitle')}</p>", unsafe_allow_html=True)
-with col_am_link:
-    st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
-    if st.button("🎬 Personal Movie Space", use_container_width=True):
-        st.switch_page("pages/personal_space.py")
 
-# TMDb API Key management (Check secrets.toml, env, or session)
-api_key = get_tmdb_api_key()
+@st.dialog(tr('Add to your diary', 'Aggiungi al diario'), width='large', **dialog_options)
+def movie_dialog(selected):
+    st.subheader(f"{selected['title']} ({selected.get('year') or '—'})")
+    with st.form(f"movie_entry_{selected['tmdb_id']}"):
+        left, right = st.columns([1, 2])
+        with left:
+            if selected.get('poster_url'):
+                st.image(selected['poster_url'], width=160)
+            st.caption(', '.join(selected.get('directors', [])))
+        with right:
+            rating = st.select_slider(t('add_user_rating_label'), options=[0.0] + [i / 2 for i in range(1, 11)],
+                value=4.0, format_func=lambda v: '—' if v == 0 else f'{v:g} ★')
+            watched = st.date_input(t('add_watch_date_label'), value=datetime.date.today())
+            physical = st.checkbox(t('add_physical_checkbox'), value=False)
+            submitted = st.form_submit_button(t('add_save_button'), type='primary', use_container_width=True)
+        if submitted:
+            record = {key: selected.get(key) for key in ('tmdb_id', 'collection_id', 'genres', 'directors',
+                'actors', 'tmdb_rating', 'runtime', 'poster_path', 'overview', 'production_countries')}
+            record.update(Name=selected['title'], Year=selected.get('year'), Rating=rating or None,
+                Date=watched.isoformat(), physical_copy=physical,
+                **{'Letterboxd URI': f"https://boxd.it/tmdb-{selected['tmdb_id']}"})
+            current = st.session_state.get('enriched_data', pd.DataFrame()).copy()
+            # Repeated submissions update the film, preserving its official URI and ownership.
+            ids = pd.to_numeric(current.get('tmdb_id', pd.Series(index=current.index, dtype=float)), errors='coerce')
+            names = current.get('Name', pd.Series(index=current.index, dtype=str)).fillna('').str.casefold()
+            years = pd.to_numeric(current.get('Year', pd.Series(index=current.index, dtype=float)), errors='coerce')
+            match = (ids == selected['tmdb_id']) | ((names == selected['title'].casefold()) & (years == selected.get('year')))
+            if match.any():
+                index = current.index[match][0]
+                old = current.loc[index].to_dict()
+                record['Letterboxd URI'] = old.get('Letterboxd URI') or record['Letterboxd URI']
+                record['physical_copy'] = physical or (pd.notna(old.get('physical_copy')) and bool(old.get('physical_copy')))
+                old.update(record)
+                records = current.to_dict('records')
+                records[current.index.get_loc(index)] = old
+                updated = pd.DataFrame(records)
+            else:
+                updated = pd.concat([current, pd.DataFrame([record])], ignore_index=True)
+            try:
+                save_dataset(updated, ENRICHED_FILE)
+            except Exception as exc:
+                st.error(tr('Could not save: ', 'Salvataggio non riuscito: ') + str(exc))
+            else:
+                st.session_state['enriched_data'] = updated
+                st.session_state['data_loaded'] = True
+                st.session_state['movie_saved_notice'] = tr('In your diary: ', 'Nel tuo diario: ') + selected['title'] + (f' · {rating:g} ★' if rating else '')
+                close_movie_dialog()
+                st.rerun()
 
-if api_key:
-    masked = api_key[:4] + "..." + api_key[-4:] if len(api_key) > 8 else "****"
-    st.markdown(
-        f"""
-        <div style="background: rgba(0, 224, 84, 0.08); border: 1px solid rgba(0, 224, 84, 0.25); border-radius: 8px; padding: 6px 12px; margin-bottom: 12px;">
-            <span style="color: #00E054; font-size: 0.85rem; font-weight: 600;">🔑 TMDb API Key Active: <code>{masked}</code></span>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-else:
-    with st.expander("🔑 TMDb API Key Required", expanded=True):
-        key_input = st.text_input(
-            "TMDb API Key (v3 auth):",
-            value=st.session_state.get('tmdb_api_key', ''),
-            type="password",
-            help="Required to query TMDb API directly. You can also paste it in .streamlit/secrets.toml"
-        )
-        if key_input:
-            st.session_state['tmdb_api_key'] = key_input.strip()
-            api_key = key_input.strip()
-            st.success("API Key saved for current session!")
-
-# Search inputs
-col_s1, col_s2, col_s3 = st.columns([3, 1, 1])
-
-with col_s1:
-    search_query = st.text_input(t("add_search_label"), placeholder=t("add_search_placeholder"))
-
-with col_s2:
-    search_year = st.text_input(t("add_year_label"), placeholder="e.g. 2023")
-
-with col_s3:
-    st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-    search_clicked = st.button(f"🔍 {t('add_search_button')}", use_container_width=True, type="primary")
-
-# Maintain search results in session state
-if 'search_results' not in st.session_state:
-    st.session_state['search_results'] = []
-if 'selected_movie_details' not in st.session_state:
-    st.session_state['selected_movie_details'] = None
-
-if search_clicked:
-    current_key = get_tmdb_api_key()
-    if not current_key:
-        st.error("Please enter a valid TMDb API Key or add it to .streamlit/secrets.toml before searching.")
-    elif not search_query.strip():
-        st.warning("Please enter a movie title to search.")
+if not get_tmdb_api_key():
+    st.info(tr('Configure a TMDb API key in Settings to search.', 'Configura una chiave TMDb nelle Impostazioni per cercare.'))
+    st.page_link('pages/settings.py', label=t('nav_settings'))
+with st.form('movie_search'):
+    left, right = st.columns([3, 1])
+    query = left.text_input(t('add_search_label'), placeholder=t('add_search_placeholder'))
+    year = right.text_input(t('add_year_label'), placeholder='2024')
+    search = st.form_submit_button(t('add_search_button'), type='primary')
+if search:
+    if not query.strip():
+        st.warning(tr('Enter a film title.', 'Inserisci il titolo di un film.'))
+    elif not get_tmdb_api_key():
+        st.warning(tr('A TMDb key is required.', 'È necessaria una chiave TMDb.'))
     else:
-        with st.spinner(t("add_searching")):
-            results = search_movies(search_query.strip(), api_key=current_key, year=search_year.strip() if search_year else None)
-            st.session_state['search_results'] = results
-            st.session_state['selected_movie_details'] = None
-            if not results:
-                st.info(t("add_no_results"))
-
-# Display search results
+        with st.spinner(t('add_searching')):
+            st.session_state['search_results'] = search_movies(query.strip(), year=year.strip() or None)
+        if not st.session_state['search_results']:
+            st.info(t('add_no_results'))
 results = st.session_state.get('search_results', [])
 if results:
-    st.markdown(f"#### 🎬 {t('add_select_prompt')}")
-    
-    cols = st.columns(min(len(results), 4))
-    for idx, movie in enumerate(results[:8]):
-        col = cols[idx % len(cols)]
-        with col:
-            st.markdown(
-                f"""
-                <div class="lb-card" style="height: 380px; display: flex; flex-direction: column; justify-content: space-between;">
-                    <div>
-                        <img src="{movie['poster_url'] or 'https://via.placeholder.com/200x300?text=No+Poster'}" 
-                             style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; margin-bottom: 8px;">
-                        <h4 style="margin: 0; font-size: 1rem; color: #EEF2F6; line-height: 1.2;">{movie['title']}</h4>
-                        <span style="color: #FF8000; font-size: 0.85rem; font-weight: bold;">📅 {movie['year']}</span> &nbsp;
-                        <span style="color: #00E054; font-size: 0.85rem;">⭐ {movie['tmdb_rating'] or 'N/A'}</span>
-                        <p style="color: #9AB; font-size: 0.78rem; margin-top: 6px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;">
-                            {movie['overview']}
-                        </p>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-            if st.button(f"👉 Select: {movie['title'][:18]}...", key=f"btn_select_{movie['id']}", use_container_width=True):
-                with st.spinner("Fetching full details..."):
-                    details = fetch_movie_details_by_id(movie['id'], get_tmdb_api_key())
-                    st.session_state['selected_movie_details'] = details
+    cols = st.columns(4)
+    for index, movie in enumerate(results):
+        with cols[index % 4]:
+            title = re.sub(r'[\\\[\]!*_`<>]', '', movie['title'])
+            label = f"![{title}]({movie['poster_url']})" if movie.get('poster_url') else title
+            if st.button(label, key=f"movie_cover_{movie['id']}", help=f"{movie['title']} ({movie['year']})", use_container_width=True):
+                with st.spinner(tr('Loading film…', 'Caricamento film…')):
+                    details = fetch_movie_details_by_id(movie['id'])
+                if details:
+                    st.session_state['movie_dialog_selection'] = details
+                else:
+                    st.error(tr('Film details unavailable. Please retry.', 'Dettagli non disponibili. Riprova.'))
+            st.write(movie['title'])
+            st.caption(f"{movie['year']} · TMDb {movie.get('tmdb_rating') or '—'} / 10")
 
-st.divider()
-
-# Rating and saving form for selected movie
-selected = st.session_state.get('selected_movie_details')
-if selected:
-    st.subheader(f"✨ Configure Diary Entry: {selected['title']} ({selected.get('year') or 'N/A'})")
-    
-    col_d1, col_d2 = st.columns([1, 2])
-    
-    with col_d1:
-        if selected.get('poster_url'):
-            st.image(selected['poster_url'], use_container_width=True)
-        st.markdown(f"**Directors:** {', '.join(selected.get('directors', [])) or 'N/A'}")
-        st.markdown(f"**Cast:** {', '.join(selected.get('actors', [])) or 'N/A'}")
-        st.markdown(f"**Genres:** {', '.join(selected.get('genres', [])) or 'N/A'}")
-        if selected.get('runtime'):
-            st.markdown(f"**Runtime:** {selected['runtime']} min")
-            
-    with col_d2:
-        st.markdown(f"<p style='color: #9AB;'>{selected.get('overview', '')}</p>", unsafe_allow_html=True)
-        
-        rating_options = ["No Rating", "0.5 ★", "1.0 ★", "1.5 ★", "2.0 ★", "2.5 ★", "3.0 ★", "3.5 ★", "4.0 ★", "4.5 ★", "5.0 ★"]
-        chosen_rating_str = st.select_slider(
-            t("add_user_rating_label"),
-            options=rating_options,
-            value="4.0 ★",
-            help=t("add_user_rating_help")
-        )
-        
-        watch_date = st.date_input(
-            t("add_watch_date_label"),
-            value=datetime.date.today()
-        )
-        
-        own_physical = st.checkbox(
-            f"💿 {t('add_physical_checkbox')}",
-            value=False,
-            help="Check if you own a physical disc copy (4K UHD, Blu-ray, DVD)"
-        )
-        
-        save_button = st.button(f"💾 {t('add_save_button')}", type="primary", use_container_width=True)
-        
-        if save_button:
-            if chosen_rating_str == "No Rating":
-                user_rating = np.nan
-            else:
-                user_rating = float(chosen_rating_str.replace(" ★", ""))
-                
-            new_record = {
-                "Date": watch_date.strftime("%Y-%m-%d"),
-                "Name": selected['title'],
-                "Year": selected.get('year') or 0,
-                "Letterboxd URI": f"https://boxd.it/tmdb-{selected['tmdb_id']}",
-                "genres": selected.get('genres', []),
-                "directors": selected.get('directors', []),
-                "actors": selected.get('actors', []),
-                "tmdb_rating": selected.get('tmdb_rating'),
-                "Rating": user_rating,
-                "physical_copy": bool(own_physical),
-                "runtime": selected.get('runtime'),
-                "poster_path": selected.get('poster_path'),
-                "overview": selected.get('overview', ""),
-                "production_countries": selected.get('production_countries', [])
-            }
-            
-            if 'enriched_data' in st.session_state:
-                current_df = st.session_state['enriched_data'].copy()
-            elif os.path.exists(ENRICHED_FILE):
-                current_df = pd.read_parquet(ENRICHED_FILE)
-            else:
-                current_df = pd.DataFrame()
-                
-            new_df_row = pd.DataFrame([new_record])
-            updated_df = pd.concat([current_df, new_df_row], ignore_index=True)
-            
-            updated_df.to_parquet(ENRICHED_FILE, index=False)
-            st.session_state['enriched_data'] = updated_df
-            st.session_state['data_loaded'] = True
-            
-            st.success(f"🎉 {t('add_success')}")
-            st.balloons()
+if st.session_state.get('movie_dialog_selection'):
+    movie_dialog(st.session_state['movie_dialog_selection'])
+    if not dialog_options:
+        close_movie_dialog()

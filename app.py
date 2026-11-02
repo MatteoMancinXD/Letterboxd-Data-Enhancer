@@ -14,7 +14,7 @@ st.set_page_config(
 # Custom CSS
 def load_css(file_name):
     if os.path.exists(file_name):
-        with open(file_name) as f:
+        with open(file_name, encoding="utf-8-sig") as f:
             st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
 
 load_css("assets/style.css")
@@ -33,7 +33,6 @@ if 'data_loaded' not in st.session_state:
 # --- MULTI-PAGE NAVIGATION (RENAMED SIDEBAR PAGES) ---
 overview_page = st.Page("pages/overview.py", title=t("nav_overview"), icon="📊", default=True)
 personal_space_page = st.Page("pages/personal_space.py", title=t("nav_personal_space"), icon="🎬")
-sagas_page = st.Page("pages/sagas.py", title=t("nav_sagas"), icon="🪐")
 stats_page = st.Page("pages/more_statistics.py", title=t("nav_statistics"), icon="📈")
 add_page = st.Page("pages/add_movie.py", title=t("nav_add_movie"), icon="➕")
 data_page = st.Page("pages/data_manager.py", title=t("nav_data_manager"), icon="⚙️")
@@ -44,7 +43,7 @@ analytics_section = "Analytics & Diary" if lang == "en" else "Analitica & Diario
 manage_section = "Manage & Settings" if lang == "en" else "Gestione & Impostazioni"
 
 pg = st.navigation({
-    analytics_section: [overview_page, personal_space_page, sagas_page, stats_page],
+    analytics_section: [overview_page, personal_space_page, stats_page],
     manage_section: [add_page, data_page, settings_page]
 })
 
@@ -52,10 +51,8 @@ pg = st.navigation({
 with st.sidebar:
     st.markdown(
         """
-        <div style="padding: 10px 0 16px 0; border-bottom: 1px solid rgba(255,255,255,0.08); margin-bottom: 12px;">
-            <span style="font-size: 1.25rem; font-weight: 800; color: #FF8000;">Letterboxd</span>
-            <span style="font-size: 1.25rem; font-weight: 300; color: #EEF2F6;">Enhancer</span>
-        </div>
+        <div class="brand"><div class="brand-caption">Your cinema. Connected.</div>
+        <div class="brand-name">Letterboxd <i>Enhancer</i></div></div>
         """,
         unsafe_allow_html=True
     )

@@ -116,6 +116,9 @@ def fetch_movie_details_by_id(movie_id, api_key=None):
         
         return {
             "tmdb_id": movie_id,
+            "release_date": rel_date,
+            "vote_count": movie_details.get("vote_count"),
+            "collection_id": (movie_details.get("belongs_to_collection") or {}).get("id"),
             "title": movie_details.get("title") or movie_details.get("original_title"),
             "year": yr,
             "genres": genres,
@@ -144,7 +147,7 @@ def fetch_movie_metadata(title, year, api_key=None):
     params = {
         "api_key": key,
         "query": title,
-        "year": int(year) if year and str(year).isdigit() else None
+        "year": int(float(year)) if year is not None and str(year).replace('.0', '').isdigit() else None
     }
     
     try:

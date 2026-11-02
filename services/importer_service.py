@@ -16,6 +16,7 @@ import struct
 import zipfile
 import time
 import os
+import tempfile
 import pandas as pd
 import numpy as np
 from services.tmbd_service import fetch_movie_metadata
@@ -92,17 +93,13 @@ def validate_and_extract_zip(zip_bytes: bytes) -> dict:
     except Exception as e:
         raise ZipSecurityError(f"Failed to parse ZIP archive: {e}")
 
-    # Check CRC32 integrity
-    bad_file = zf.testzip()
-    if bad_file:
-        raise ZipSecurityError(f"Archive integrity check failed: file '{bad_file}' is corrupted.")
-
     entries = zf.infolist()
     if len(entries) > MAX_ENTRIES_COUNT:
         raise ZipSecurityError(f"ZIP archive contains too many entries ({len(entries)} > {MAX_ENTRIES_COUNT}). Potential zip bomb.")
 
     total_uncompressed = 0
     extracted_csvs = {}
+    candidates = []
 
     for info in entries:
         # Check encryption
@@ -140,7 +137,29 @@ def validate_and_extract_zip(zip_bytes: bytes) -> dict:
 
         if lower_name.endswith('.csv'):
             base_name = lower_name.rsplit('/', 1)[-1]
-            extracted_csvs[base_name] = zf.read(info)
+            # Only account exports: lists/reviews may contain unrelated CSVs.
+            if base_name in {'watched.csv', 'ratings.csv', 'diary.csv'}:
+                if not any(part.startswith('.') or part == '__macosx' for part in lower_name.split('/')[:-1]):
+                    candidates.append((lower_name, info))
+
+    # Letterboxd may include nested exports (e.g. tv/diary.csv). Only the
+    # top-level account CSVs belong to the film library. Allow a wrapper folder.
+    if candidates:
+        depth = min(name.count('/') for name, _ in candidates)
+        roots = {name.rsplit('/', 1)[0] if '/' in name else ''
+                 for name, _ in candidates if name.count('/') == depth}
+        if len(roots) != 1:
+            raise ZipSecurityError("Multiple account export folders found; upload one Letterboxd export at a time.")
+        for name, info in candidates:
+            if name.count('/') == depth:
+                base_name = name.rsplit('/', 1)[-1]
+                if base_name in extracted_csvs:
+                    raise ZipSecurityError(f"Duplicate account file at the same path: {name}")
+                extracted_csvs[base_name] = info
+
+    # Decompress only after ALL size checks. Reading verifies each CSV's CRC.
+    extracted_csvs = {name: zf.read(info) for name, info in extracted_csvs.items()}
+    zf.close()
 
     if not extracted_csvs:
         raise ZipSecurityError("No valid Letterboxd CSV files found in the ZIP archive.")
@@ -158,7 +177,7 @@ def read_csv_safe(data_bytes: bytes) -> pd.DataFrame:
             continue
         except Exception as e:
             raise ValueError(f"Could not parse CSV: {e}")
-    return pd.read_csv(io.BytesIO(data_bytes), encoding='utf-8', errors='replace')
+    return pd.read_csv(io.BytesIO(data_bytes), encoding='utf-8', encoding_errors='replace')
 
 
 def load_uploaded_files(uploaded_files_list) -> tuple[pd.DataFrame, dict]:
@@ -184,17 +203,15 @@ def load_uploaded_files(uploaded_files_list) -> tuple[pd.DataFrame, dict]:
             # Validates security and extracts in-memory CSVs
             csv_bytes_map = validate_and_extract_zip(content)
             for csv_name, csv_bytes in csv_bytes_map.items():
-                try:
-                    df = read_csv_safe(csv_bytes)
-                    raw_csv_dict[csv_name] = df
-                except Exception as e:
-                    pass
+                if csv_name in raw_csv_dict:
+                    raise ValueError(f"Duplicate export file: {csv_name}")
+                raw_csv_dict[csv_name] = read_csv_safe(csv_bytes)
         elif fname.endswith('.csv'):
-            try:
-                df = read_csv_safe(content)
-                raw_csv_dict[fname] = df
-            except Exception as e:
-                pass
+            if fname not in {'watched.csv', 'ratings.csv', 'diary.csv'}:
+                raise ValueError("Use watched.csv, ratings.csv or diary.csv from Letterboxd.")
+            if fname in raw_csv_dict:
+                raise ValueError(f"Duplicate export file: {fname}")
+            raw_csv_dict[fname] = read_csv_safe(content)
 
     if not raw_csv_dict:
         return pd.DataFrame(), {}
@@ -204,6 +221,7 @@ def load_uploaded_files(uploaded_files_list) -> tuple[pd.DataFrame, dict]:
     
     info = {
         "source": source_type,
+        "sync_mode": combined_df.attrs.get('sync_mode', 'partial'),
         "files_found": list(raw_csv_dict.keys()),
         "total_records": len(combined_df),
         "has_ratings": int(combined_df['Rating'].notna().sum()) if 'Rating' in combined_df.columns else 0
@@ -211,112 +229,96 @@ def load_uploaded_files(uploaded_files_list) -> tuple[pd.DataFrame, dict]:
     return combined_df, info
 
 
+def _find_match(row, records):
+    """Prefer URI, then exact title/year; unknown years must be unambiguous."""
+    uri = normalize_uri(row.get('Letterboxd URI'))
+    if uri:
+        matches = [i for i, other in enumerate(records)
+                   if normalize_uri(other.get('Letterboxd URI')) == uri]
+        if len(matches) == 1:
+            return matches[0]
+    name = normalize_title(row.get('Name', row.get('Title')))
+    year = normalize_year(row.get('Year'))
+    candidates = [i for i, other in enumerate(records)
+                  if name and normalize_title(other.get('Name', other.get('Title'))) == name]
+    exact = [i for i in candidates if normalize_year(records[i].get('Year')) == year]
+    if len(exact) == 1:
+        return exact[0]
+    if not year and len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
 def merge_letterboxd_dfs(csv_dict: dict) -> pd.DataFrame:
+    """watched defines membership; ratings is authoritative; diary uses latest date.
+
+    Partial uploads update only supplied films/fields. A missing Rating column
+    means 'no information', while an explicitly blank rating means 'unrated'.
     """
-    Intelligently merges watched.csv, ratings.csv, and diary.csv from Letterboxd.
-    Prioritizes:
-    - watched.csv for complete history of watched films.
-    - ratings.csv for official star ratings.
-    - diary.csv for diary dates and ratings if missing.
-    """
-    watched_df = next((df for name, df in csv_dict.items() if 'watched' in name), None)
-    ratings_df = next((df for name, df in csv_dict.items() if 'rating' in name), None)
-    diary_df = next((df for name, df in csv_dict.items() if 'diary' in name), None)
+    sources = {}
+    for filename, frame in csv_dict.items():
+        if filename not in {'watched.csv', 'ratings.csv', 'diary.csv'}:
+            continue
+        frame = frame.copy()
+        frame.columns = [str(c).strip() for c in frame.columns]
+        if 'Name' not in frame and 'Title' in frame:
+            frame['Name'] = frame['Title']
+        if 'Name' not in frame or frame['Name'].isna().any():
+            raise ValueError(f"{filename}: missing film names")
+        if filename == 'ratings.csv' and 'Rating' not in frame:
+            raise ValueError('ratings.csv: missing Rating column')
+        if 'Rating' in frame:
+            values = pd.to_numeric(frame['Rating'], errors='coerce')
+            invalid = frame['Rating'].notna() & (
+                values.isna() | ~values.between(0.5, 5) | (values * 2 % 1 != 0))
+            if invalid.any():
+                raise ValueError(f"{filename}: ratings must be between 0.5 and 5 in half-star steps")
+            frame['Rating'] = values
+        date_col = 'Watched Date' if 'Watched Date' in frame else 'Date'
+        if date_col in frame:
+            frame['_sort_date'] = pd.to_datetime(frame[date_col], errors='coerce')
+            frame = frame.sort_values('_sort_date', kind='stable', na_position='first').drop(columns='_sort_date')
+        records = []
+        for row in frame.to_dict('records'):
+            row['_rating_present'] = 'Rating' in frame
+            if filename == 'diary.csv' and pd.notna(row.get('Watched Date')):
+                row['Date'] = row['Watched Date']
+            match = _find_match(row, records)
+            if match is None:
+                records.append(row)
+            else:
+                records[match] = row
+        sources[filename] = records
 
-    # Standardize column names
-    def clean_cols(d):
-        if d is None:
-            return None
-        res = d.copy()
-        res.columns = [str(c).strip() for c in res.columns]
-        if 'Title' in res.columns and 'Name' not in res.columns:
-            res['Name'] = res['Title']
-        return res
-
-    watched_df = clean_cols(watched_df)
-    ratings_df = clean_cols(ratings_df)
-    diary_df = clean_cols(diary_df)
-
-    # Base DataFrame
-    if watched_df is not None and not watched_df.empty:
-        base_df = watched_df.copy()
-    elif diary_df is not None and not diary_df.empty:
-        # Deduplicate diary entries to create base watched list
-        diary_clean = diary_df.copy()
-        if 'Watched Date' in diary_clean.columns and 'Date' not in diary_clean.columns:
-            diary_clean['Date'] = diary_clean['Watched Date']
-        dedup_keys = [c for c in ['Letterboxd URI', 'Name', 'Year'] if c in diary_clean.columns] or ['Name']
-        base_df = diary_clean.drop_duplicates(subset=dedup_keys, keep='last').copy()
-    elif ratings_df is not None and not ratings_df.empty:
-        base_df = ratings_df.copy()
-    else:
-        # Fallback to the first available dataframe
-        base_df = clean_cols(next(iter(csv_dict.values())))
-
-    # Ensure required columns
-    for col in ['Name', 'Year', 'Letterboxd URI']:
-        if col not in base_df.columns:
-            base_df[col] = ""
-
-    # Attach or merge Ratings
-    if ratings_df is not None and 'Rating' in ratings_df.columns:
-        join_keys = [c for c in ['Letterboxd URI', 'Name', 'Year'] if c in base_df.columns and c in ratings_df.columns]
-        if 'Letterboxd URI' in join_keys and (base_df['Letterboxd URI'].astype(str).str.contains('boxd.it').sum() > 0):
-            keys_to_use = ['Letterboxd URI']
-        elif 'Name' in join_keys and 'Year' in join_keys:
-            keys_to_use = ['Name', 'Year']
-        else:
-            keys_to_use = ['Name'] if 'Name' in join_keys else []
-
-        if keys_to_use:
-            rating_sub = ratings_df[keys_to_use + ['Rating']].dropna(subset=['Rating']).drop_duplicates(subset=keys_to_use, keep='last')
-            if 'Rating' in base_df.columns:
-                base_df = base_df.drop(columns=['Rating'])
-            base_df = pd.merge(base_df, rating_sub, on=keys_to_use, how='left')
-
-    # If Rating is still missing or unrated, try pulling from diary.csv
-    if diary_df is not None and 'Rating' in diary_df.columns:
-        if 'Rating' not in base_df.columns:
-            base_df['Rating'] = np.nan
-        
-        diary_keys = [c for c in ['Letterboxd URI', 'Name', 'Year'] if c in base_df.columns and c in diary_df.columns]
-        if 'Letterboxd URI' in diary_keys:
-            d_keys = ['Letterboxd URI']
-        elif 'Name' in diary_keys and 'Year' in diary_keys:
-            d_keys = ['Name', 'Year']
-        else:
-            d_keys = ['Name'] if 'Name' in diary_keys else []
-            
-        if d_keys:
-            diary_ratings = diary_df[d_keys + ['Rating']].dropna(subset=['Rating']).drop_duplicates(subset=d_keys, keep='last')
-            diary_map = dict(zip(diary_ratings[d_keys[0]], diary_ratings['Rating'])) if len(d_keys) == 1 else None
-            if diary_map:
-                base_df['Rating'] = base_df['Rating'].fillna(base_df[d_keys[0]].map(diary_map))
-
-    # Also add any films from diary that weren't in watched.csv
-    if diary_df is not None and watched_df is not None:
-        diary_names = set(diary_df['Name'].dropna().astype(str).str.strip().str.lower())
-        watched_names = set(base_df['Name'].dropna().astype(str).str.strip().str.lower())
-        missing_names = diary_names - watched_names
-        if missing_names:
-            missing_diary = diary_df[diary_df['Name'].astype(str).str.strip().str.lower().isin(missing_names)].copy()
-            if 'Watched Date' in missing_diary.columns and 'Date' not in missing_diary.columns:
-                missing_diary['Date'] = missing_diary['Watched Date']
-            dedup_keys = [c for c in ['Name', 'Year'] if c in missing_diary.columns] or ['Name']
-            missing_clean = missing_diary.drop_duplicates(subset=dedup_keys)
-            base_df = pd.concat([base_df, missing_clean], ignore_index=True)
-
-    # Clean up types and deduplicate
-    dedup_cols = ['Letterboxd URI'] if ('Letterboxd URI' in base_df.columns and base_df['Letterboxd URI'].astype(str).str.contains('boxd.it').sum() > 0) else [c for c in ['Name', 'Year'] if c in base_df.columns]
-    if dedup_cols:
-        base_df = base_df.drop_duplicates(subset=dedup_cols, keep='last')
-
-    if 'Rating' in base_df.columns:
-        base_df['Rating'] = pd.to_numeric(base_df['Rating'], errors='coerce')
-    else:
-        base_df['Rating'] = np.nan
-
-    return base_df.reset_index(drop=True)
+    full = 'watched.csv' in sources
+    base = [dict(row) for row in sources.get('watched.csv', [])]
+    if not full:
+        for filename in ('diary.csv', 'ratings.csv'):
+            for row in sources.get(filename, []):
+                if _find_match(row, base) is None:
+                    base.append(dict(row))
+    for row in base:
+        diary = sources.get('diary.csv', [])
+        match = _find_match(row, diary)
+        if match is not None:
+            entry = diary[match]
+            if pd.notna(entry.get('Date')):
+                row['Date'] = entry['Date']
+            if entry['_rating_present']:
+                row['Rating'] = entry.get('Rating', np.nan)
+                row['_rating_present'] = True
+        if 'ratings.csv' in sources:
+            ratings = sources['ratings.csv']
+            match = _find_match(row, ratings)
+            # Full snapshot: absence from ratings.csv means rating removed.
+            # With ratings.csv present, do not resurrect historical diary ratings.
+            if match is not None or full or 'diary.csv' in sources:
+                row['Rating'] = ratings[match].get('Rating', np.nan) if match is not None else np.nan
+                row['_rating_present'] = True
+        row.setdefault('Rating', np.nan)
+    result = pd.DataFrame(base)
+    result.attrs['sync_mode'] = 'full' if full else 'partial'
+    return result.reset_index(drop=True)
 
 
 # --- CANONICAL FILM IDENTIFIER & DIFF ENGINE ---
@@ -342,107 +344,68 @@ def normalize_uri(val):
     return s if ('boxd.it' in s or 'letterboxd.com' in s) else ""
 
 
-def compute_dataset_diff(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def compute_dataset_diff(existing_df: pd.DataFrame, new_df: pd.DataFrame,
+                         sync_mode=None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Return additions, removals and updated retained films without mutating inputs.
+
+    Deletions require watched.csv (or an explicitly selected full snapshot).
+    The retained frame carries a rating_changes list for preview and reporting.
     """
-    Compares the existing enriched dataset with a newly uploaded Letterboxd export.
-    
-    Returns:
-        (added_df, deleted_df, retained_df)
-        - added_df: new films in new_df not in existing_df (to be enriched with TMDb metadata).
-        - deleted_df: films in existing_df not in new_df (to be removed from the database).
-        - retained_df: films in existing_df that are preserved, with updated ratings/dates
-          applied from new_df while strictly preserving all existing TMDb enrichment metadata
-          and physical_copy toggles.
-    """
-    if existing_df is None or existing_df.empty:
-        return new_df.copy() if new_df is not None else pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-        
-    if new_df is None or new_df.empty:
-        return pd.DataFrame(), existing_df.copy(), pd.DataFrame()
+    if new_df is None:
+        new_df = pd.DataFrame()
+    mode = sync_mode or new_df.attrs.get('sync_mode', 'partial')
+    if mode not in {'full', 'partial'}:
+        raise ValueError('Invalid synchronization mode')
+    if existing_df is None:
+        existing_df = pd.DataFrame()
+    records = existing_df.to_dict('records')
+    retained = [dict(row) for row in records]
+    matched = set()
+    additions, changes = [], []
+    for incoming in new_df.to_dict('records'):
+        idx = _find_match(incoming, records)
+        if idx is None:
+            additions.append({k: v for k, v in incoming.items() if not k.startswith('_')})
+            continue
+        matched.add(idx)
+        row = retained[idx]
+        if incoming.get('_rating_present', 'Rating' in incoming):
+            old = pd.to_numeric(row.get('Rating'), errors='coerce')
+            new = pd.to_numeric(incoming.get('Rating'), errors='coerce')
+            if not ((pd.isna(old) and pd.isna(new)) or old == new):
+                changes.append({'Name': row.get('Name', row.get('Title')), 'Year': row.get('Year'),
+                                'Previous rating': old, 'New rating': new})
+            row['Rating'] = new
+        for col in ('Date', 'Watched Date', 'Letterboxd URI'):
+            if pd.notna(incoming.get(col)) and str(incoming[col]).strip():
+                row[col] = str(incoming[col])
+    deleted = [row for i, row in enumerate(records) if mode == 'full' and i not in matched]
+    kept = [row for i, row in enumerate(retained) if mode == 'partial' or i in matched]
+    retained_df = pd.DataFrame(kept, columns=sorted(set(existing_df.columns) | {k for r in kept for k in r}))
+    retained_df.attrs['rating_changes'] = changes
+    return (pd.DataFrame(additions, columns=[c for c in new_df.columns if not c.startswith('_')]),
+            pd.DataFrame(deleted, columns=existing_df.columns), retained_df)
 
-    existing_by_uri = {}
-    existing_by_title_year = {}
 
-    for idx, row in existing_df.iterrows():
-        uri = normalize_uri(row.get('Letterboxd URI'))
-        if uri:
-            existing_by_uri[uri] = idx
-        name = normalize_title(row.get('Name') if pd.notna(row.get('Name')) else row.get('Title'))
-        year = normalize_year(row.get('Year'))
-        if name:
-            existing_by_title_year[(name, year)] = idx
-            if year != 0 and (name, 0) not in existing_by_title_year:
-                existing_by_title_year[(name, 0)] = idx
-
-    matched_existing_indices = set()
-    added_new_indices = []
-    new_to_existing_map = {}
-
-    for new_idx, new_row in new_df.iterrows():
-        new_uri = normalize_uri(new_row.get('Letterboxd URI'))
-        new_name = normalize_title(new_row.get('Name') if pd.notna(new_row.get('Name')) else new_row.get('Title'))
-        new_year = normalize_year(new_row.get('Year'))
-
-        matched_idx = None
-        if new_uri and new_uri in existing_by_uri:
-            matched_idx = existing_by_uri[new_uri]
-        elif (new_name, new_year) in existing_by_title_year:
-            matched_idx = existing_by_title_year[(new_name, new_year)]
-        elif (new_name, 0) in existing_by_title_year:
-            matched_idx = existing_by_title_year[(new_name, 0)]
-
-        if matched_idx is not None and matched_idx not in matched_existing_indices:
-            matched_existing_indices.add(matched_idx)
-            new_to_existing_map[new_idx] = matched_idx
-        else:
-            added_new_indices.append(new_idx)
-
-    # 1. Added movies
-    added_df = new_df.loc[added_new_indices].copy().reset_index(drop=True) if added_new_indices else pd.DataFrame(columns=new_df.columns)
-
-    # 2. Deleted movies
-    deleted_indices = [idx for idx in existing_df.index if idx not in matched_existing_indices]
-    deleted_df = existing_df.loc[deleted_indices].copy().reset_index(drop=True) if deleted_indices else pd.DataFrame(columns=existing_df.columns)
-
-    # 3. Retained movies (preserves TMDb columns and physical_copy, updates rating & date)
-    retained_records = []
-    for new_idx, ex_idx in new_to_existing_map.items():
-        ex_row = existing_df.loc[ex_idx].to_dict()
-        new_row = new_df.loc[new_idx]
-
-        # Update Rating from new export
-        if 'Rating' in new_df.columns:
-            new_rating = new_row.get('Rating')
-            if pd.notna(new_rating):
-                try:
-                    ex_row['Rating'] = float(new_rating)
-                except Exception:
-                    ex_row['Rating'] = new_rating
-            else:
-                ex_row['Rating'] = np.nan
-
-        # Update Date from new export
-        if 'Date' in new_df.columns and pd.notna(new_row.get('Date')):
-            ex_row['Date'] = str(new_row.get('Date'))
-
-        # Update Letterboxd URI if new_df has official URI and existing was tmdb placeholder
-        if 'Letterboxd URI' in new_df.columns and pd.notna(new_row.get('Letterboxd URI')):
-            uri_val = str(new_row.get('Letterboxd URI')).strip()
-            if uri_val and ('tmdb-' not in uri_val or not ex_row.get('Letterboxd URI')):
-                ex_row['Letterboxd URI'] = uri_val
-
-        # Ensure physical_copy is preserved
-        ex_row['physical_copy'] = bool(ex_row.get('physical_copy', False))
-
-        retained_records.append(ex_row)
-
-    retained_df = pd.DataFrame(retained_records) if retained_records else pd.DataFrame(columns=existing_df.columns)
-    return added_df, deleted_df, retained_df
+def save_dataset(df, parquet_path):
+    """Replace the database only after the complete new parquet was written."""
+    directory = os.path.dirname(os.path.abspath(parquet_path))
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(suffix='.parquet', dir=directory)
+    os.close(fd)
+    try:
+        clean = df.copy()
+        clean.attrs = {}
+        clean.to_parquet(temporary, index=False)
+        os.replace(temporary, parquet_path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
 
 
 def apply_dataset_update(existing_df: pd.DataFrame, new_raw_df: pd.DataFrame, api_key: str,
                          parquet_path: str = "data/letterboxd_enriched.parquet",
-                         progress_callback=None, status_callback=None) -> tuple[pd.DataFrame, dict]:
+                         progress_callback=None, status_callback=None, sync_mode=None) -> tuple[pd.DataFrame, dict]:
     """
     Executes the watched list synchronization:
     1. Identifies added, deleted, and retained films.
@@ -451,7 +414,7 @@ def apply_dataset_update(existing_df: pd.DataFrame, new_raw_df: pd.DataFrame, ap
     4. Writes the updated dataset to the parquet file.
     5. Returns (updated_enriched_df, diff_summary).
     """
-    added_df, deleted_df, retained_df = compute_dataset_diff(existing_df, new_raw_df)
+    added_df, deleted_df, retained_df = compute_dataset_diff(existing_df, new_raw_df, sync_mode)
 
     title_col = "Name" if "Name" in added_df.columns else ("Title" if "Title" in added_df.columns else None)
     year_col = "Year" if "Year" in added_df.columns else None
@@ -472,6 +435,8 @@ def apply_dataset_update(existing_df: pd.DataFrame, new_raw_df: pd.DataFrame, ap
         record["physical_copy"] = False  # Default for newly imported films
 
         if meta:
+            record["tmdb_id"] = meta.get("tmdb_id")
+            record["collection_id"] = meta.get("collection_id")
             record["genres"] = meta.get("genres", [])
             record["directors"] = meta.get("directors", [])
             record["actors"] = meta.get("actors", [])
@@ -506,10 +471,11 @@ def apply_dataset_update(existing_df: pd.DataFrame, new_raw_df: pd.DataFrame, ap
         final_df = retained_df.copy()
 
     # Save to parquet
-    os.makedirs(os.path.dirname(parquet_path), exist_ok=True)
-    final_df.to_parquet(parquet_path, index=False)
+    final_df.attrs = {}
+    save_dataset(final_df, parquet_path)
 
     summary = {
+        "ratings_updated": len(retained_df.attrs.get("rating_changes", [])),
         "added": len(added_df),
         "deleted": len(deleted_df),
         "retained": len(retained_df),
