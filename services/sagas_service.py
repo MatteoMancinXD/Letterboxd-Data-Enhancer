@@ -1,4 +1,5 @@
 # services/sagas_service.py
+from collections import Counter
 import re
 import datetime
 import tempfile
@@ -9,6 +10,7 @@ import requests
 import pandas as pd
 import numpy as np
 from services.tmbd_service import get_tmdb_api_key, fetch_movie_metadata, fetch_movie_details_by_id
+from services.ratings_service import rating_to_10
 
 DATA_DIR = "data"
 CACHE_FILE = os.path.join(DATA_DIR, "tmdb_collections_cache.json")
@@ -28,6 +30,17 @@ def normalize_title(title):
     s = re.sub(r'[^a-z0-9]', '', s)
     return s
 
+
+def _clean_str_list(value):
+    """Convert a list, tuple, ndarray, or comma-separated string into clean strings."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return [str(item).strip() for item in value if pd.notna(item) and str(item).strip()]
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(',') if part.strip()]
+    return []
+
 # --- CURATED CINEMATIC UNIVERSES & MAJOR SAGAS REGISTRY ---
 # Each entry defines canonical films with titles, release years, and common aliases.
 CURATED_SAGAS = [
@@ -39,7 +52,7 @@ CURATED_SAGAS = [
         "badge_color": "#E52E71",
         "backdrop_url": "https://image.tmdb.org/t/p/w780/yF1EbTN8gfLrmIX594LioRJko92.jpg",
         "poster_url": "https://image.tmdb.org/t/p/w300/or06FN3Dka5tukK1e9sl16pB3iy.jpg",
-        "description": "The monumental Marvel Cinematic Universe spanning Phase 1 to Phase 5. Only theatrical feature films.",
+        "description": "The monumental Marvel Cinematic Universe spanning Phase 1 to Phase 6. Only theatrical feature films.",
         "films": [
             # Phase 1
             {"title": "Iron Man", "year": 2008, "phase": "Phase 1: Assemble", "aliases": []},
@@ -81,7 +94,11 @@ CURATED_SAGAS = [
             {"title": "The Marvels", "year": 2023, "phase": "Phase 5", "aliases": ["Captain Marvel 2"]},
             {"title": "Deadpool & Wolverine", "year": 2024, "phase": "Phase 5", "aliases": ["Deadpool 3"]},
             {"title": "Captain America: Brave New World", "year": 2025, "phase": "Phase 5", "aliases": ["Brave New World"]},
-            {"title": "Thunderbolts*", "year": 2025, "phase": "Phase 5", "aliases": ["Thunderbolts"]}
+            {"title": "Thunderbolts*", "year": 2025, "phase": "Phase 5", "aliases": ["Thunderbolts"]},
+            # Phase 6
+            {"title": "The Fantastic Four: First Steps", "year": 2025, "phase": "Phase 6", "release_date": "2025-07-25", "aliases": ["The Fantastic 4: First Steps", "Fantastic Four: First Steps", "Fantastic 4: First Steps"]},
+            {"title": "Spider-Man: Brand New Day", "year": 2026, "phase": "Phase 6", "release_date": "2026-07-31", "aliases": ["Spider-Man 4"]},
+            {"title": "Avengers: Doomsday", "year": 2026, "phase": "Phase 6", "release_date": "2026-12-18", "aliases": ["Avengers 5"]}
         ]
     },
     {
@@ -92,7 +109,7 @@ CURATED_SAGAS = [
         "badge_color": "#FFC107",
         "backdrop_url": "https://image.tmdb.org/t/p/w780/5Iw7zQWebEMiISV6jh99flAh0f0.jpg",
         "poster_url": "https://image.tmdb.org/t/p/w300/6FfCtAuVAW8XJjZ7eWeLibRLWTw.jpg",
-        "description": "The complete theatrical Star Wars film saga: the 9 Skywalker Saga chapters, Rogue One, Solo, and the upcoming Mandalorian feature film.",
+        "description": "The complete theatrical Star Wars film saga: the 9 Skywalker Saga chapters, Rogue One, Solo, The Clone Wars, and The Mandalorian & Grogu.",
         "films": [
             {"title": "Star Wars: Episode IV - A New Hope", "year": 1977, "phase": "Original Trilogy", "aliases": ["Star Wars", "A New Hope", "Star Wars: A New Hope"]},
             {"title": "Star Wars: Episode V - The Empire Strikes Back", "year": 1980, "phase": "Original Trilogy", "aliases": ["The Empire Strikes Back", "Empire Strikes Back"]},
@@ -106,7 +123,7 @@ CURATED_SAGAS = [
             {"title": "Star Wars: The Last Jedi", "year": 2017, "phase": "Sequel Trilogy", "aliases": ["The Last Jedi", "Star Wars: Episode VIII - The Last Jedi"]},
             {"title": "Solo: A Star Wars Story", "year": 2018, "phase": "Star Wars Stories", "aliases": ["Solo"]},
             {"title": "Star Wars: The Rise of Skywalker", "year": 2019, "phase": "Sequel Trilogy", "aliases": ["The Rise of Skywalker", "Star Wars: Episode IX - The Rise of Skywalker"]},
-            {"title": "The Mandalorian & Grogu", "year": 2026, "phase": "New Era (2026)", "aliases": ["The Mandalorian and Grogu", "The Mandalorian", "Mandalorian"], "upcoming": True}
+            {"title": "The Mandalorian & Grogu", "year": 2026, "phase": "New Era (2026)", "release_date": "2026-05-22", "aliases": ["The Mandalorian and Grogu", "The Mandalorian", "Mandalorian"]}
         ]
     },
     {
@@ -365,7 +382,7 @@ CURATED_SAGAS = [
         "badge_color": "#FF8000",
         "backdrop_url": "https://image.tmdb.org/t/p/w780/628Dep6AxEtDxjZoGP78TsOxYbK.jpg",
         "poster_url": "https://image.tmdb.org/t/p/w300/NNxYkU70HPurnNCSiCjYAmacwm.jpg",
-        "description": "Tom Cruise's breathtaking stunts and Ethan Hunt's death-defying IMF missions across 7 films.",
+        "description": "Tom Cruise's breathtaking stunts and Ethan Hunt's death-defying IMF missions across 8 films.",
         "films": [
             {"title": "Mission: Impossible", "year": 1996, "phase": "IMF Origins", "aliases": ["Mission Impossible 1"]},
             {"title": "Mission: Impossible II", "year": 2000, "phase": "John Woo Era", "aliases": ["Mission: Impossible 2", "M:I-2"]},
@@ -373,7 +390,8 @@ CURATED_SAGAS = [
             {"title": "Mission: Impossible - Ghost Protocol", "year": 2011, "phase": "Brad Bird Era", "aliases": ["Ghost Protocol", "Mission: Impossible 4"]},
             {"title": "Mission: Impossible - Rogue Nation", "year": 2015, "phase": "McQuarrie Era", "aliases": ["Rogue Nation", "Mission: Impossible 5"]},
             {"title": "Mission: Impossible - Fallout", "year": 2018, "phase": "McQuarrie Era", "aliases": ["Fallout", "Mission: Impossible 6"]},
-            {"title": "Mission: Impossible - Dead Reckoning Part One", "year": 2023, "phase": "McQuarrie Era", "aliases": ["Dead Reckoning", "Mission: Impossible 7"]}
+            {"title": "Mission: Impossible - Dead Reckoning Part One", "year": 2023, "phase": "McQuarrie Era", "aliases": ["Dead Reckoning", "Mission: Impossible 7"]},
+            {"title": "Mission: Impossible - The Final Reckoning", "year": 2025, "phase": "McQuarrie Era", "release_date": "2025-05-23", "aliases": ["Mission: Impossible – The Final Reckoning", "Mission: Impossible 8", "The Final Reckoning"]}
         ]
     },
     {
@@ -418,14 +436,15 @@ CURATED_SAGAS = [
         "badge_color": "#00E054",
         "backdrop_url": "https://image.tmdb.org/t/p/w780/9K4B6mGjV4oF8c1p64g0J521m8.jpg",
         "poster_url": "https://image.tmdb.org/t/p/w300/c566q0z1v03oA4Y727h8W9845uV.jpg",
-        "description": "65 million years in the making: Spielberg's classic trilogy and the modern Jurassic World trilogy.",
+        "description": "65 million years in the making: Spielberg's classic trilogy, the Jurassic World trilogy, and Rebirth.",
         "films": [
             {"title": "Jurassic Park", "year": 1993, "phase": "Isla Nublar Classic", "aliases": []},
             {"title": "The Lost World: Jurassic Park", "year": 1997, "phase": "Isla Sorna", "aliases": ["The Lost World", "Jurassic Park 2"]},
             {"title": "Jurassic Park III", "year": 2001, "phase": "Isla Sorna", "aliases": ["Jurassic Park 3"]},
             {"title": "Jurassic World", "year": 2015, "phase": "World Reborn", "aliases": []},
             {"title": "Jurassic World: Fallen Kingdom", "year": 2018, "phase": "World Reborn", "aliases": ["Fallen Kingdom"]},
-            {"title": "Jurassic World Dominion", "year": 2022, "phase": "Global Coexistence", "aliases": ["Dominion"]}
+            {"title": "Jurassic World Dominion", "year": 2022, "phase": "Global Coexistence", "aliases": ["Dominion"]},
+            {"title": "Jurassic World Rebirth", "year": 2025, "phase": "Rebirth", "release_date": "2025-07-02", "aliases": ["Jurassic World: Rebirth", "Jurassic World 4"]}
         ]
     },
     {
@@ -469,12 +488,13 @@ CURATED_SAGAS = [
         "badge_color": "#E52E71",
         "backdrop_url": "https://image.tmdb.org/t/p/w780/h8gHn0OzToRIImCd4AG28GZuhR1.jpg",
         "poster_url": "https://image.tmdb.org/t/p/w300/fZPSd91yGE9fCcCe6OoQr6E3Bev.jpg",
-        "description": "Keanu Reeves' legendary Baba Yaga fighting the High Table through 4 chapters.",
+        "description": "Keanu Reeves' legendary Baba Yaga fighting the High Table across 4 chapters and the Ballerina spinoff.",
         "films": [
             {"title": "John Wick", "year": 2014, "phase": "Baba Yaga", "aliases": []},
             {"title": "John Wick: Chapter 2", "year": 2017, "phase": "Blood Oath", "aliases": ["John Wick 2"]},
             {"title": "John Wick: Chapter 3 - Parabellum", "year": 2019, "phase": "Excommunicado", "aliases": ["John Wick 3", "Parabellum"]},
-            {"title": "John Wick: Chapter 4", "year": 2023, "phase": "The High Table", "aliases": ["John Wick 4"]}
+            {"title": "John Wick: Chapter 4", "year": 2023, "phase": "The High Table", "aliases": ["John Wick 4"]},
+            {"title": "From the World of John Wick: Ballerina", "year": 2025, "phase": "Spinoff", "release_date": "2025-06-06", "aliases": ["Ballerina"]}
         ]
     },
     {
@@ -491,7 +511,8 @@ CURATED_SAGAS = [
             {"title": "Toy Story 2", "year": 1999, "phase": "Andy's Room", "aliases": []},
             {"title": "Toy Story 3", "year": 2010, "phase": "Sunnyside & College", "aliases": []},
             {"title": "Toy Story 4", "year": 2019, "phase": "Forky & Road Trip", "aliases": []},
-            {"title": "Lightyear", "year": 2022, "phase": "Spinoff", "aliases": []}
+            {"title": "Lightyear", "year": 2022, "phase": "Spinoff", "aliases": []},
+            {"title": "Toy Story 5", "year": 2026, "phase": "Tech Era", "release_date": "2026-06-19", "aliases": []}
         ]
     },
     {
@@ -542,7 +563,8 @@ CURATED_SAGAS = [
             {"title": "The Hunger Games: Catching Fire", "year": 2013, "phase": "Quarter Quell", "aliases": ["Catching Fire"]},
             {"title": "The Hunger Games: Mockingjay - Part 1", "year": 2014, "phase": "Rebellion", "aliases": ["Mockingjay - Part 1", "Mockingjay Part 1"]},
             {"title": "The Hunger Games: Mockingjay - Part 2", "year": 2015, "phase": "Rebellion", "aliases": ["Mockingjay - Part 2", "Mockingjay Part 2"]},
-            {"title": "The Hunger Games: The Ballad of Songbirds & Snakes", "year": 2023, "phase": "Prequel", "aliases": ["The Ballad of Songbirds & Snakes", "Songbirds & Snakes"]}
+            {"title": "The Hunger Games: The Ballad of Songbirds & Snakes", "year": 2023, "phase": "Prequel", "aliases": ["The Ballad of Songbirds & Snakes", "Songbirds & Snakes"]},
+            {"title": "The Hunger Games: Sunrise on the Reaping", "year": 2026, "phase": "Prequel", "release_date": "2026-11-20", "aliases": ["Sunrise on the Reaping"]}
         ]
     },
     {
@@ -570,7 +592,7 @@ CURATED_SAGAS = [
         "badge_color": "#00E054",
         "backdrop_url": "https://image.tmdb.org/t/p/w780/AmR3JG1YrIh0vfJ5e9y1A7F0J3.jpg",
         "poster_url": "https://image.tmdb.org/t/p/w300/vfrQk5IPloGg1v9FU42eFa0YFrg.jpg",
-        "description": "The terrifying Xenomorph and Yautja mythology from Ridley Scott's 1979 masterpiece to Romulus.",
+        "description": "The terrifying Xenomorph and Yautja mythology from Ridley Scott's 1979 masterpiece through Romulus, AVP, and Predator: Badlands.",
         "films": [
             {"title": "Alien", "year": 1979, "phase": "Xenomorph", "aliases": []},
             {"title": "Aliens", "year": 1986, "phase": "Xenomorph", "aliases": ["Alien 2"]},
@@ -583,7 +605,10 @@ CURATED_SAGAS = [
             {"title": "Predator 2", "year": 1990, "phase": "Predator", "aliases": []},
             {"title": "Predators", "year": 2010, "phase": "Predator", "aliases": []},
             {"title": "The Predator", "year": 2018, "phase": "Predator", "aliases": []},
-            {"title": "Prey", "year": 2022, "phase": "Predator", "aliases": []}
+            {"title": "Prey", "year": 2022, "phase": "Predator", "aliases": []},
+            {"title": "AVP: Alien vs. Predator", "year": 2004, "phase": "Crossover", "aliases": ["Alien vs. Predator", "Alien vs Predator"]},
+            {"title": "Aliens vs Predator: Requiem", "year": 2007, "phase": "Crossover", "aliases": ["AVPR: Aliens vs Predator - Requiem", "Alien vs. Predator: Requiem", "Aliens vs. Predator: Requiem"]},
+            {"title": "Predator: Badlands", "year": 2025, "phase": "Predator", "release_date": "2025-11-07", "aliases": []}
         ]
     },
     {
@@ -627,7 +652,8 @@ CURATED_SAGAS = [
         "description": "Denis Villeneuve's visionary cinematic realization of Frank Herbert's Arrakis epic.",
         "films": [
             {"title": "Dune", "year": 2021, "phase": "Arrakis Awakening", "aliases": ["Dune: Part One", "Dune: Part 1"]},
-            {"title": "Dune: Part Two", "year": 2024, "phase": "Holy War", "aliases": ["Dune 2", "Dune: Part 2"]}
+            {"title": "Dune: Part Two", "year": 2024, "phase": "Holy War", "aliases": ["Dune 2", "Dune: Part 2"]},
+            {"title": "Dune: Part Three", "year": 2026, "phase": "Messiah", "release_date": "2026-12-18", "aliases": ["Dune: Messiah", "Dune 3"]}
         ]
     },
     {
@@ -641,7 +667,8 @@ CURATED_SAGAS = [
         "description": "James Cameron's record-shattering Pandora expeditions.",
         "films": [
             {"title": "Avatar", "year": 2009, "phase": "Pandora Rainforest", "aliases": []},
-            {"title": "Avatar: The Way of Water", "year": 2022, "phase": "Pandora Oceans", "aliases": ["Avatar 2"]}
+            {"title": "Avatar: The Way of Water", "year": 2022, "phase": "Pandora Oceans", "aliases": ["Avatar 2"]},
+            {"title": "Avatar: Fire and Ash", "year": 2025, "phase": "Ash People", "release_date": "2025-12-19", "aliases": ["Avatar 3"]}
         ]
     },
     {
@@ -684,12 +711,16 @@ def build_user_library_lookup(df):
             if yr_str.isdigit():
                 year = int(yr_str)
                 
-        user_rating = row.get('Rating') if ('Rating' in row and pd.notna(row.get('Rating'))) else None
+        raw_rating = rating_to_10(row.get('Rating')) if ('Rating' in row and pd.notna(row.get('Rating'))) else None
+        user_rating = raw_rating if (raw_rating is not None and pd.notna(raw_rating)) else None
         has_physical = bool(row.get('physical_copy')) if ('physical_copy' in row and pd.notna(row.get('physical_copy'))) else False
         poster = row.get('poster_path') if ('poster_path' in row and pd.notna(row.get('poster_path'))) else None
         tmdb_score = row.get('tmdb_rating') if ('tmdb_rating' in row and pd.notna(row.get('tmdb_rating'))) else None
         runtime = row.get('runtime') if ('runtime' in row and pd.notna(row.get('runtime'))) else None
-        
+        directors = _clean_str_list(row.get('directors'))
+        genres = _clean_str_list(row.get('genres'))
+        watch_date = str(row.get('Date')) if ('Date' in row and pd.notna(row.get('Date'))) else None
+
         lookup.append({
             "idx": idx,
             "tmdb_id": int(row["tmdb_id"]) if pd.notna(row.get("tmdb_id")) else None,
@@ -700,7 +731,10 @@ def build_user_library_lookup(df):
             "has_physical": has_physical,
             "poster_path": poster,
             "tmdb_rating": tmdb_score,
-            "runtime": runtime
+            "runtime": runtime,
+            "directors": directors,
+            "genres": genres,
+            "watch_date": watch_date,
         })
         
     return lookup
@@ -778,6 +812,8 @@ def saga_catalog(include_tmdb_collections=True):
             for field in ('tmdb_id', 'poster_path', 'tmdb_rating', 'vote_count', 'release_date'):
                 if details.get(field) is not None:
                     film[field] = details[field]
+            if details.get('directors'):
+                film['directors'] = _clean_str_list(details['directors'])
     result = list(curated)
     for collection in collections:
         collection = dict(collection, source='tmdb')
@@ -832,6 +868,9 @@ def compute_sagas_progress(df, include_tmdb_collections=True, today=None):
             item = dict(film)
             item['release_state'] = release_state(item, today)
             item['upcoming'] = item['release_state'] != 'released'
+            item['directors'] = _clean_str_list(item.get('directors'))
+            item['genres'] = _clean_str_list(item.get('genres'))
+            item['watch_date'] = None
             match = match_film(item, lookup)
             item.update(watched=match is not None, user_rating=None, has_physical=False)
             if match:
@@ -841,6 +880,9 @@ def compute_sagas_progress(df, include_tmdb_collections=True, today=None):
                 item['tmdb_rating'] = item.get('tmdb_rating') or match['tmdb_rating']
                 item['runtime'] = match['runtime']
                 item['diary_title'] = match['title']
+                item['directors'] = match.get('directors') or item['directors']
+                item['genres'] = match.get('genres') or item['genres']
+                item['watch_date'] = match.get('watch_date')
                 identity = match.get('tmdb_id') or (match['norm'], match['year'])
                 unique_watched.add(identity)
                 if item['has_physical']:
@@ -848,29 +890,126 @@ def compute_sagas_progress(df, include_tmdb_collections=True, today=None):
             films.append(item)
         if not films:
             continue
-        released = [f for f in films if f['release_state'] == 'released']
-        watched = [f for f in films if f['watched']]
+        ordered_films = sorted(films, key=lambda f: (f.get('release_date') or str(f.get('year') or 9999), f['title']))
+        released = [f for f in ordered_films if f['release_state'] == 'released']
+        watched = [f for f in ordered_films if f['watched']]
         released_watched = [f for f in released if f['watched']]
         ratings = [float(f['user_rating']) for f in watched if pd.notna(f['user_rating'])]
         scores = [float(f['tmdb_rating']) for f in released
                   if pd.notna(f.get('tmdb_rating')) and float(f['tmdb_rating']) > 0
                   and (f.get('vote_count') is None or f['vote_count'] > 0)]
-        # Taste gap uses the same films on both scales (personal rating × 2).
-        pairs = [float(f['user_rating']) * 2 - float(f['tmdb_rating']) for f in released_watched
+        # Both personal ratings and TMDb scores are on the 1–10 scale.
+        pairs = [float(f['user_rating']) - float(f['tmdb_rating']) for f in released_watched
                  if pd.notna(f['user_rating']) and pd.notna(f.get('tmdb_rating')) and f['tmdb_rating'] > 0]
         pct = len(released_watched) / len(released) * 100 if released else 0.0
-        summary = dict(saga, total_films=len(films), released_films=len(released),
+        is_complete = bool(released) and len(released_watched) == len(released)
+        avg_user_rating = round(float(np.mean(ratings)), 2) if ratings else None
+        avg_tmdb_rating = round(float(np.mean(scores)), 2) if scores else None
+
+        poster_source = ordered_films[0] if ordered_films[0].get('poster_path') else next(
+            (f for f in ordered_films if f.get('poster_path')), None
+        )
+        poster_path_resolved = poster_source.get('poster_path') if poster_source else None
+        if isinstance(poster_path_resolved, str) and poster_path_resolved.startswith(('http://', 'https://')):
+            poster_url_resolved = poster_path_resolved
+        elif poster_path_resolved:
+            poster_url_resolved = f"https://image.tmdb.org/t/p/w342{poster_path_resolved}"
+        else:
+            poster_url_resolved = None
+        poster_film_title = poster_source.get('title') if poster_source else None
+
+        dir_counter = Counter(d for f in ordered_films for d in f.get('directors', []))
+        director_counts = sorted(dir_counter.items(), key=lambda pair: (-pair[1], pair[0].casefold()))
+        directors_list = [name for name, _ in director_counts]
+        genre_counter = Counter(g for f in ordered_films for g in f.get('genres', []))
+        genres_list = [name for name, _ in sorted(genre_counter.items(), key=lambda pair: (-pair[1], pair[0].casefold()))[:5]]
+
+        years = [int(str(f['year']).replace('.0', '')) for f in ordered_films
+                 if f.get('year') and str(f['year']).replace('.0', '').isdigit()]
+        year_start = min(years) if years else None
+        year_end = max(years) if years else None
+        if year_start and year_end and year_start != year_end:
+            year_span = f"{year_start}–{year_end}"
+        elif year_start:
+            year_span = str(year_start)
+        else:
+            year_span = ""
+        total_runtime_min = int(sum(
+            float(f['runtime']) for f in watched
+            if pd.notna(f.get('runtime')) and float(f['runtime']) > 0
+        ))
+
+        rated_watched = [f for f in ordered_films if f['watched'] and pd.notna(f.get('user_rating'))]
+        if rated_watched:
+            max_r = max(float(f['user_rating']) for f in rated_watched)
+            tied_best = sorted(
+                [f for f in rated_watched if float(f['user_rating']) == max_r],
+                key=lambda f: (-(float(f['tmdb_rating']) if pd.notna(f.get('tmdb_rating')) else -1.0), f.get('year') or 9999, f['title'])
+            )
+            best_film = dict(
+                title=tied_best[0]['title'],
+                year=tied_best[0].get('year'),
+                rating=round(max_r, 2),
+                poster_path=tied_best[0].get('poster_path'),
+                tie_count=len(tied_best),
+            )
+            best_films = [dict(title=f['title'], year=f.get('year'), rating=round(max_r, 2)) for f in tied_best]
+            min_r = min(float(f['user_rating']) for f in rated_watched)
+            if min_r < max_r:
+                tied_worst = sorted(
+                    [f for f in rated_watched if float(f['user_rating']) == min_r],
+                    key=lambda f: (float(f['tmdb_rating']) if pd.notna(f.get('tmdb_rating')) else 99.0, f.get('year') or 9999, f['title'])
+                )
+                worst_film = dict(
+                    title=tied_worst[0]['title'],
+                    year=tied_worst[0].get('year'),
+                    rating=round(min_r, 2),
+                )
+            else:
+                worst_film = None
+        else:
+            best_film = None
+            best_films = []
+            worst_film = None
+
+        next_to_watch = next(
+            (dict(title=f['title'], year=f.get('year'), tmdb_rating=f.get('tmdb_rating'), poster_path=f.get('poster_path'))
+             for f in ordered_films if not f['watched'] and f['release_state'] == 'released'),
+            None
+        )
+        recovery_score = (
+            round(avg_user_rating + min(len(ratings), 5) * 0.16 + (pct / 100.0) * 0.5, 2)
+            if (not is_complete and len(watched) > 0 and avg_user_rating is not None)
+            else None
+        )
+
+        summary = dict(saga, total_films=len(ordered_films), released_films=len(released),
             watched_count=len(watched), remaining_count=len(released) - len(released_watched),
-            upcoming_count=sum(f['release_state'] == 'upcoming' for f in films),
-            unknown_release_count=sum(f['release_state'] == 'unknown' for f in films),
-            progress_pct=round(pct, 1), is_complete=bool(released) and len(released_watched) == len(released),
-            matched_films=watched, unmatched_films=[f for f in films if not f['watched']],
-            all_films=sorted(films, key=lambda f: (f.get('release_date') or str(f.get('year') or 9999), f['title'])),
-            avg_user_rating=round(float(np.mean(ratings)), 2) if ratings else None,
-            avg_tmdb_rating=round(float(np.mean(scores)), 2) if scores else None,
+            upcoming_count=sum(f['release_state'] == 'upcoming' for f in ordered_films),
+            unknown_release_count=sum(f['release_state'] == 'unknown' for f in ordered_films),
+            progress_pct=round(pct, 1), is_complete=is_complete,
+            matched_films=watched, unmatched_films=[f for f in ordered_films if not f['watched']],
+            all_films=ordered_films,
+            avg_user_rating=avg_user_rating,
+            avg_tmdb_rating=avg_tmdb_rating,
             taste_gap=round(float(np.mean(pairs)), 2) if pairs else None,
             comparison_count=len(pairs), ratings_count=len(ratings), tmdb_ratings_count=len(scores),
-            physical_count=sum(f['has_physical'] for f in watched))
+            physical_count=sum(f['has_physical'] for f in watched),
+            poster_path_resolved=poster_path_resolved,
+            poster_url_resolved=poster_url_resolved,
+            poster_film_title=poster_film_title,
+            director_counts=director_counts,
+            directors=directors_list,
+            genres=genres_list,
+            year_start=year_start,
+            year_end=year_end,
+            year_span=year_span,
+            total_runtime_min=total_runtime_min,
+            best_film=best_film,
+            best_films=best_films,
+            worst_film=worst_film,
+            next_to_watch=next_to_watch,
+            recovery_score=recovery_score)
         group = 'completed_sagas' if summary['is_complete'] else 'started_sagas' if watched else 'unstarted_sagas'
         groups[group].append(summary)
     groups['started_sagas'].sort(key=by_progress_desc)
@@ -969,7 +1108,10 @@ def refresh_curated_saga(saga_id, progress_callback=None):
                 else fetch_movie_metadata(film['title'], film.get('year'), key))
         exact_title = meta and normalize_title(meta['title']) in {normalize_title(film['title']), *(normalize_title(a) for a in film.get('aliases', []))}
         if meta and (movie_id == meta.get('tmdb_id') or (exact_title and meta.get('year') == film.get('year'))):
-            film = dict(film, **{k: meta.get(k) for k in ('tmdb_id', 'tmdb_rating', 'vote_count', 'release_date', 'poster_path')})
+            updates = {k: meta.get(k) for k in ('tmdb_id', 'tmdb_rating', 'vote_count', 'release_date', 'poster_path')}
+            if meta.get('directors'):
+                updates['directors'] = _clean_str_list(meta.get('directors'))
+            film = dict(film, **updates)
         else:
             failed += 1
         films.append(film)
@@ -991,6 +1133,8 @@ def add_film_to_curated_saga(saga_id, movie_id, phase=''):
     film = dict(title=meta['title'], year=meta.get('year'), phase=phase,
                 aliases=[], **{k: meta.get(k) for k in
                 ('tmdb_id', 'tmdb_rating', 'vote_count', 'release_date', 'poster_path')})
+    if meta.get('directors'):
+        film['directors'] = _clean_str_list(meta.get('directors'))
     if any(f.get('tmdb_id') == movie_id or film_key(f) == film_key(film) for f in saga['films']):
         return False
     entries = {s['id']: s for s in read_cache(CURATED_CACHE_FILE)}

@@ -1,7 +1,11 @@
 """An editorial opening page for the personal cinema journal."""
 import html
+from urllib.parse import urlencode
 import pandas as pd
 import streamlit as st
+from services.importer_service import normalize_year
+from services.ratings_service import rating_to_10, series_to_10, format_rating_10
+from services.sagas_service import read_cache, write_cache
 from services.translations import t, localized as tr
 
 
@@ -10,11 +14,35 @@ def safe(value):
 
 
 df = st.session_state.get('enriched_data', pd.DataFrame())
-posters = []
+POSTER_PREFERENCES = 'data/overview_posters.json'
+poster_options = {}
 if not df.empty and 'poster_path' in df:
     selection = df.sort_values('Rating', ascending=False) if 'Rating' in df else df
-    posters = selection['poster_path'].dropna().drop_duplicates().head(3).tolist()
-poster_html = ''.join(f'<img src="https://image.tmdb.org/t/p/w500{safe(path)}" alt="{tr("A film from your library", "Un film della tua libreria")}">' for path in posters if str(path).startswith('/'))
+    selection = selection[selection['poster_path'].str.startswith('/', na=False)]
+    for index, film in selection.iterrows():
+        title = film.get('Name')
+        if pd.isna(title):
+            title = film.get('Title')
+        if pd.isna(title):
+            continue
+        year = normalize_year(film.get('Year'))
+        key = f'{str(title).strip().casefold()}|{year}'
+        label = f'{title} ({year})' if year else str(title)
+        poster_options.setdefault(key, (index, label, film['poster_path']))
+
+saved_posters = read_cache(POSTER_PREFERENCES)
+if not isinstance(saved_posters, list):
+    saved_posters = []
+selected_posters = list(dict.fromkeys(
+    key for key in saved_posters if isinstance(key, str) and key in poster_options
+))
+selected_posters.extend(key for key in poster_options if key not in selected_posters)
+selected_posters = selected_posters[:3]
+poster_html = ''
+for key in selected_posters:
+    index, label, path = poster_options[key]
+    poster_html += (f'<a href="/personal_space?{urlencode(dict(film=index))}" target="_self">'
+                    f'<img src="https://image.tmdb.org/t/p/w500{safe(path)}" alt="{safe(label)}"></a>')
 headline = tr('Your films.<br>Your <em>universe.</em>', 'I tuoi film.<br>Il tuo <em>universo.</em>')
 intro = tr('Every film leaves something behind. Rediscover your favourites, follow your curiosity, and see the shape of your cinematic world.',
            'Ogni film lascia qualcosa. Ritrova i tuoi preferiti, segui la curiosità e scopri il filo che unisce le tue visioni.')
@@ -22,14 +50,34 @@ st.markdown(f'<section class="editorial-hero"><div><div class="eyebrow">Letterbo
 if df.empty:
     st.page_link('pages/data_manager.py', label=tr('Begin your journal →', 'Inizia il tuo diario →'))
     st.stop()
-ratings = pd.to_numeric(df.get('Rating', pd.Series(dtype=float)), errors='coerce')
+if poster_options:
+    required = min(3, len(poster_options))
+    with st.expander(tr('Choose your covers', 'Scegli le copertine')):
+        with st.form('overview_poster_picker'):
+            chosen = st.multiselect(
+                tr('Films to feature, in display order', 'Film da mostrare, in ordine di visualizzazione'),
+                options=list(poster_options), default=selected_posters, max_selections=required,
+                format_func=lambda key: poster_options[key][1],
+            )
+            if st.form_submit_button(tr('Save covers', 'Salva copertine')):
+                if len(chosen) != required:
+                    st.warning(tr(f'Select {required} films to save.', f'Seleziona {required} film per salvare.'))
+                else:
+                    try:
+                        write_cache(POSTER_PREFERENCES, chosen)
+                    except OSError:
+                        st.error(tr('Could not save your covers.', 'Impossibile salvare le copertine.'))
+                    else:
+                        st.rerun()
+
+ratings = series_to_10(df.get('Rating', pd.Series(dtype=float)))
 owned = int(df['physical_copy'].fillna(False).sum()) if 'physical_copy' in df else 0
 runtime = pd.to_numeric(df.get('runtime', pd.Series(dtype=float)), errors='coerce').sum()
 cols = st.columns(4)
 for col, label, value in zip(cols,
         [tr('FILMS IN YOUR JOURNAL', 'FILM NEL TUO DIARIO'), tr('YOUR AVERAGE RATING', 'IL TUO VOTO MEDIO'),
          tr('HOURS OF CINEMA', 'ORE DI CINEMA'), tr('ON YOUR SHELF', 'NELLA TUA COLLEZIONE')],
-        [f'{len(df):,}', f'{ratings.mean():.2f} / 5' if ratings.notna().any() else '—', f'{runtime / 60:,.0f}', owned]):
+        [f'{len(df):,}', f'{ratings.mean():.2f} / 10' if ratings.notna().any() else '—', f'{runtime / 60:,.0f}', owned]):
     col.metric(label, value)
 st.markdown(f'<div class="section-heading"><h2>{tr("Your next discovery", "Il prossimo sguardo")}</h2><span>{tr("EXPLORE YOUR CINEMA", "ESPLORA IL TUO CINEMA")}</span></div>', unsafe_allow_html=True)
 left, right = st.columns(2, gap='large')
@@ -45,15 +93,22 @@ if 'Date' in recent:
     recent['_date'] = pd.to_datetime(recent['Date'], errors='coerce')
     recent = recent.sort_values('_date', ascending=False, na_position='last')
 recent = recent.head(6)
-for col, (_, movie) in zip(st.columns(len(recent)), recent.iterrows()):
+for col, (index, movie) in zip(st.columns(len(recent)), recent.iterrows()):
     with col:
         path = movie.get('poster_path')
-        if pd.notna(path) and str(path).startswith('/'):
-            st.image('https://image.tmdb.org/t/p/w300' + str(path), use_container_width=True)
-        title = movie.get('Name', movie.get('Title', ''))
+        title = safe(movie.get('Name', movie.get('Title', '')))
         year = movie.get('Year', '')
-        rating = movie.get('Rating')
-        score = f' · {rating:g} / 5' if pd.notna(rating) else ''
-        st.markdown(f'<div class="film-caption">{safe(title)}</div><div class="film-meta">{safe(year)}{safe(score)}</div>', unsafe_allow_html=True)
+        rating_10 = rating_to_10(movie.get('Rating'))
+        score = f' · {format_rating_10(rating_10, suffix=" / 10")}' if pd.notna(rating_10) else ''
+        url = f"/personal_space?{urlencode(dict(film=index))}"
+        poster = ''
+        if pd.notna(path) and str(path).startswith('/'):
+            poster = f'<img src="https://image.tmdb.org/t/p/w300{safe(path)}" alt="">'
+        st.markdown(
+            f'<a class="recent-film" href="{url}" target="_self">{poster}'
+            f'<div class="film-caption">{title}</div></a>'
+            f'<div class="film-meta">{safe(year)}{safe(score)}</div>',
+            unsafe_allow_html=True,
+        )
 st.divider()
 st.page_link('pages/data_manager.py', label=tr('Keep your journal up to date →', 'Aggiorna il tuo diario →'))

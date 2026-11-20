@@ -436,6 +436,7 @@ def apply_dataset_update(existing_df: pd.DataFrame, new_raw_df: pd.DataFrame, ap
 
         if meta:
             record["tmdb_id"] = meta.get("tmdb_id")
+            record["imdb_id"] = meta.get("imdb_id")
             record["collection_id"] = meta.get("collection_id")
             record["genres"] = meta.get("genres", [])
             record["directors"] = meta.get("directors", [])

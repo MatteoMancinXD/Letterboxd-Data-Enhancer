@@ -6,12 +6,28 @@ import altair as alt
 import os
 from collections import Counter
 from itertools import combinations
-from services.translations import t
-from services.ratings_service import calculate_taste_affinity
+from services.translations import t, localized as tr
+from services.importer_service import save_dataset
+from services.omdb_service import update_scores
+from services.ratings_service import calculate_taste_affinity, series_to_10
 from services.nationality_service import compute_nationality_statistics
 from services.awards_service import compute_awards_analytics
 
-# Custom CSS
+
+def render_numbered_table(frame: pd.DataFrame, **kwargs) -> None:
+    """Display a DataFrame with a clean 1-based row index."""
+    numbered = frame.reset_index(drop=True)
+    numbered.index = pd.RangeIndex(start=1, stop=len(numbered) + 1)
+    st.dataframe(numbered, **kwargs)
+
+
+def _prepare_film_table(frame: pd.DataFrame, cols) -> pd.DataFrame:
+    """Select display columns and convert Rating to the 1–10 scale."""
+    subset = frame[[c for c in cols if c in frame.columns]].copy()
+    if 'Rating' in subset.columns:
+        subset['Rating'] = series_to_10(subset['Rating'])
+        subset = subset.rename(columns={'Rating': tr('Your Rating (/10)', 'Tuo Voto (/10)')})
+    return subset
 
 
 # --- DATA RECOVERY ---
@@ -67,7 +83,7 @@ def prepare_dataset(df):
     if 'Rating' in data.columns:
         data['Rating'] = pd.to_numeric(data['Rating'], errors='coerce')
         # Normalized 10-point scale for user rating (0.5-5.0 stars -> 1.0-10.0)
-        data['user_rating_10'] = data['Rating'] * 2.0
+        data['user_rating_10'] = series_to_10(data['Rating'])
     else:
         data['Rating'] = np.nan
         data['user_rating_10'] = np.nan
@@ -122,9 +138,9 @@ with col_kpi2:
         st.metric(t("stats_range_years"), "N/A")
 
 with col_kpi3:
-    if has_user_ratings and filtered_df['Rating'].notna().any():
-        avg_u = filtered_df['Rating'].dropna().mean()
-        st.metric(t("stats_avg_user"), f"{avg_u:.2f} ★")
+    if has_user_ratings and filtered_df['user_rating_10'].notna().any():
+        avg_u = filtered_df['user_rating_10'].dropna().mean()
+        st.metric(t("stats_avg_user"), f"{avg_u:.2f} / 10 ★")
     elif filtered_df['tmdb_rating'].notna().any():
         st.metric(t("stats_avg_tmdb"), f"{filtered_df['tmdb_rating'].dropna().mean():.2f} / 10")
     else:
@@ -141,7 +157,7 @@ with col_kpi5:
 st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
 
 # --- TABS ---
-tab_dirs, tab_genres, tab_countries, tab_awards, tab_decades, tab_habits, tab_ratings, tab_search, tab_sagas = st.tabs([
+tab_dirs, tab_genres, tab_countries, tab_awards, tab_decades, tab_habits, tab_ratings, tab_sagas = st.tabs([
     f"🎬 {t('tab_directors')}",
     f"🧬 {t('tab_genres')}",
     f"🌍 {t('tab_nationalities')}",
@@ -149,7 +165,6 @@ tab_dirs, tab_genres, tab_countries, tab_awards, tab_decades, tab_habits, tab_ra
     f"⏳ {t('tab_decades')}",
     f"📅 {t('tab_habits')}",
     f"⭐ {t('tab_ratings')}",
-    f"🔎 {t('tab_search')}",
     f"🪐 {t('nav_sagas')}"
 ])
 
@@ -222,7 +237,7 @@ with tab_dirs:
                     cornerRadiusBottomRight=6,
                     color='#00E676'
                 ).encode(
-                    x=alt.X('Avg_Rating:Q', title="Avg Rating (0-10 Scale)", scale=alt.Scale(domain=[0, 10.5])),
+                    x=alt.X('Avg_Rating:Q', title="Avg Rating (1–10)", scale=alt.Scale(domain=[0, 10.5])),
                     y=alt.Y('Director:N', sort=top_rated_dirs['Director'].tolist(), title=None),
                     tooltip=[
                         alt.Tooltip('Director:N', title='Director'),
@@ -273,7 +288,7 @@ with tab_dirs:
             st.markdown(f"**Genres:** " + " ".join([f"<span class='genre-badge'>{g}</span>" for g in d_genres]), unsafe_allow_html=True)
 
             show_cols = [c for c in ['Name', 'Title', 'Year', 'Rating', 'tmdb_rating', 'Letterboxd URI'] if c in dir_movies.columns]
-            st.dataframe(dir_movies[show_cols].sort_values(by='Year', ascending=True), use_container_width=True)
+            render_numbered_table(_prepare_film_table(dir_movies.sort_values(by='Year', ascending=True), show_cols), use_container_width=True)
 
         st.divider()
 
@@ -330,7 +345,7 @@ with tab_dirs:
                     [{'Director': pair[0], 'Actor': pair[1], 'Together': count} for pair, count in collab_counter.most_common(10)]
                 )
                 if not top_collabs.empty:
-                    st.dataframe(top_collabs, use_container_width=True, height=240)
+                    render_numbered_table(top_collabs, use_container_width=True, height=240)
 
                 st.markdown(f"##### 👥 {t('tab1_actor_duos')}")
                 duo_counter = Counter()
@@ -343,7 +358,7 @@ with tab_dirs:
                     [{'Actor 1': duo[0], 'Actor 2': duo[1], 'Together': count} for duo, count in duo_counter.most_common(10)]
                 )
                 if not top_duos.empty:
-                    st.dataframe(top_duos, use_container_width=True, height=240)
+                    render_numbered_table(top_duos, use_container_width=True, height=240)
 
             st.divider()
 
@@ -388,8 +403,8 @@ with tab_dirs:
                     if c in act_movies.columns:
                         show_cols.append(c)
 
-                st.dataframe(
-                    act_movies[show_cols].sort_values(by='Year', ascending=True),
+                render_numbered_table(
+                    _prepare_film_table(act_movies.sort_values(by='Year', ascending=True), show_cols),
                     use_container_width=True
                 )
 
@@ -485,7 +500,7 @@ with tab_genres:
                 [{'Pair': f"{p[0]} + {p[1]}", 'Films': count} for p, count in pair_counter.most_common(12)]
             )
             if not top_pairs.empty:
-                st.dataframe(top_pairs, use_container_width=True)
+                render_numbered_table(top_pairs, use_container_width=True)
 
         with col_pair2:
             st.markdown(f"##### ⏳ {t('tab2_genre_evolution')}")
@@ -514,10 +529,14 @@ with tab_countries:
 
     col_opt1, col_opt2 = st.columns([2, 1])
     with col_opt1:
+        nat_mode_labels = {
+            "director": t("tab_nat_mode_dir"),
+            "production": t("tab_nat_mode_prod"),
+        }
         nat_mode = st.radio(
             t("tab_nat_mode_label"),
             options=["director", "production"],
-            format_func=lambda x: t("tab_nat_mode_dir") if x == "director" else t("tab_nat_mode_prod"),
+            format_func=nat_mode_labels.__getitem__,
             horizontal=True,
             key="radio_nat_analysis_mode"
         )
@@ -592,7 +611,7 @@ with tab_countries:
                     cornerRadiusBottomRight=6,
                     color='#00E676'
                 ).encode(
-                    x=alt.X('Avg_Rating:Q', title="Avg Rating (0-10 Scale)", scale=alt.Scale(domain=[0, 10.5])),
+                    x=alt.X('Avg_Rating:Q', title="Avg Rating (1–10)", scale=alt.Scale(domain=[0, 10.5])),
                     y=alt.Y('Display:N', sort=rated_nat['Display'].tolist(), title=None),
                     tooltip=[
                         alt.Tooltip('Display:N', title='Country'),
@@ -640,7 +659,7 @@ with tab_countries:
                 st.metric(t("tab_nat_directors_list"), str(nat_row['Top_Directors']))
 
             cols_show = [c for c in ['Name', 'Title', 'Year', 'Rating', 'tmdb_rating', 'Letterboxd URI'] if c in nat_films.columns]
-            st.dataframe(nat_films[cols_show].sort_values(by='Year', ascending=False), use_container_width=True)
+            render_numbered_table(_prepare_film_table(nat_films.sort_values(by='Year', ascending=False), cols_show), use_container_width=True)
     else:
         st.info("No nationality records found for current filter.")
 
@@ -690,7 +709,7 @@ with tab_awards:
             st.caption(t("tab_aw_loved_desc"))
             agreed_df = awards_results['agreed_films']
             if not agreed_df.empty:
-                st.dataframe(agreed_df[['Title', 'Year', 'Your Rating', 'Major Award', 'Festivals']].head(12), use_container_width=True)
+                render_numbered_table(agreed_df[['Title', 'Year', 'Your Rating', 'Major Award', 'Festivals']].head(12), use_container_width=True)
             else:
                 st.info(t("tab_aw_no_loved"))
 
@@ -699,7 +718,7 @@ with tab_awards:
             st.caption(t("tab_aw_overrated_desc"))
             disagreed_df = awards_results['disagreed_films']
             if not disagreed_df.empty:
-                st.dataframe(disagreed_df[['Title', 'Year', 'Your Rating', 'Major Award', 'Festivals']].head(12), use_container_width=True)
+                render_numbered_table(disagreed_df[['Title', 'Year', 'Your Rating', 'Major Award', 'Festivals']].head(12), use_container_width=True)
             else:
                 st.info(t("tab_aw_no_disliked"))
 
@@ -707,17 +726,18 @@ with tab_awards:
 
         # Full Awards Catalog with Filter
         st.subheader(f"📋 {t('tab_aw_catalog_title')}")
+        fest_filter_labels = {
+            "All": t("tab_aw_all_festivals"),
+            "Oscar": t("tab_aw_only_oscars"),
+            "Cannes": t("tab_aw_only_cannes"),
+            "Venice": t("tab_aw_only_venice"),
+            "Loved": "💚 " + t("tab_aw_loved_title").split(":")[0],
+            "Disliked": "💔 " + t("tab_aw_overrated_title").split(":")[0],
+        }
         fest_filter = st.selectbox(
             t("tab_aw_filter_festival"),
             options=["All", "Oscar", "Cannes", "Venice", "Loved", "Disliked"],
-            format_func=lambda x: {
-                "All": t("tab_aw_all_festivals"),
-                "Oscar": t("tab_aw_only_oscars"),
-                "Cannes": t("tab_aw_only_cannes"),
-                "Venice": t("tab_aw_only_venice"),
-                "Loved": "💚 " + t("tab_aw_loved_title").split(":")[0],
-                "Disliked": "💔 " + t("tab_aw_overrated_title").split(":")[0]
-            }.get(x, x),
+            format_func=lambda x, labels=fest_filter_labels: labels.get(x, x),
             key="select_awards_festival_filter"
         )
 
@@ -734,7 +754,7 @@ with tab_awards:
             display_aw_df = display_aw_df[display_aw_df['Stance'] == "Disagreed (Overrated) 💔"]
 
         catalog_cols = [c for c in ['Title', 'Year', 'Your Rating', 'TMDb Score', 'Directors', 'Major Award', 'Stance'] if c in display_aw_df.columns]
-        st.dataframe(display_aw_df[catalog_cols], use_container_width=True, height=420)
+        render_numbered_table(display_aw_df[catalog_cols], use_container_width=True, height=420)
     else:
         st.info("No major award winners (Oscar, Cannes, Venice) found in the current filter criteria.")
 
@@ -923,7 +943,7 @@ with tab_habits:
         st.markdown(f"##### 🏆 {t('tab4_binge_records')}")
         top_dates = valid_dates_df['Date'].value_counts().head(5).reset_index()
         top_dates.columns = ['Date', 'Films Logged']
-        st.dataframe(top_dates, use_container_width=True)
+        render_numbered_table(top_dates, use_container_width=True)
 
 # ==============================================================================
 # TAB 5: RATINGS & TASTE AFFINITY (MODEL COMPARISON)
@@ -956,10 +976,10 @@ with tab_ratings:
                 cornerRadiusTopRight=4,
                 color='#00E676'
             ).encode(
-                x=alt.X('primary_rating_10:Q', bin=alt.Bin(step=0.5), title="Rating (0.5 Bins)"),
+                x=alt.X('primary_rating_10:Q', bin=alt.Bin(step=1), title="Rating (1–10)"),
                 y=alt.Y('count():Q', title="Number of Films"),
                 tooltip=[
-                    alt.Tooltip('primary_rating_10:Q', bin=alt.Bin(step=0.5), title='Bin'),
+                    alt.Tooltip('primary_rating_10:Q', bin=alt.Bin(step=1), title='Bin'),
                     alt.Tooltip('count():Q', title='Films')
                 ]
             ).properties(height=340)
@@ -993,14 +1013,14 @@ with tab_ratings:
             st.markdown(f"##### 👑 {t('tab5_hall_of_fame')}")
             top_10_movies = valid_scores_df.sort_values(by='primary_rating_10', ascending=False).head(10)
             top_cols = [c for c in ['Name', 'Title', 'Year', 'Rating', 'tmdb_rating', 'clean_directors'] if c in top_10_movies.columns]
-            st.dataframe(top_10_movies[top_cols], use_container_width=True)
+            render_numbered_table(_prepare_film_table(top_10_movies, top_cols), use_container_width=True)
 
         with col_guilty:
             st.markdown(f"##### 🍿 {t('tab5_guilty_pleasures')}")
             guilty_movies = valid_scores_df[valid_scores_df['primary_rating_10'] < 6.0].sort_values(by='primary_rating_10', ascending=True).head(10)
             if not guilty_movies.empty:
                 g_cols = [c for c in ['Name', 'Title', 'Year', 'Rating', 'tmdb_rating', 'clean_directors'] if c in guilty_movies.columns]
-                st.dataframe(guilty_movies[g_cols], use_container_width=True)
+                render_numbered_table(_prepare_film_table(guilty_movies, g_cols), use_container_width=True)
             else:
                 st.info("No films under 6.0 found in current filter.")
 
@@ -1008,21 +1028,38 @@ with tab_ratings:
 
         # --- TASTE AFFINITY & MODEL COMPARISON SECTION ---
         st.subheader(f"{t('tab5_affinity_title')}")
-        st.markdown(f"<p style='color: #9AB;'>{t('tab5_affinity_desc')}</p>", unsafe_allow_html=True)
+        st.caption(tr('Pearson correlation from −1 to +1. Each source uses its own matched films. Rotten Tomatoes measures the share of positive critic reviews.',
+                      'Correlazione di Pearson da −1 a +1. Ogni fonte usa i propri film abbinati. Rotten Tomatoes misura la quota di recensioni positive della critica.'))
+        if 'enriched_data' in st.session_state:
+            with st.expander(tr('IMDb and Rotten Tomatoes via OMDb', 'IMDb e Rotten Tomatoes tramite OMDb')):
+                st.caption(tr('Enter an OMDb key to check up to 25 unprocessed rated films at a time.',
+                              'Inserisci una chiave OMDb per controllare fino a 25 film votati non ancora elaborati alla volta.'))
+                api_key = st.text_input('OMDb API key', type='password', key='omdb_api_key')
+                if st.button(tr('Fetch scores', 'Recupera punteggi'), disabled=not api_key.strip()):
+                    with st.spinner(tr('Fetching scores…', 'Recupero dei punteggi…')):
+                        updated, processed, found, failed = update_scores(st.session_state['enriched_data'], api_key.strip())
+                    if processed:
+                        save_dataset(updated, ENRICHED_FILE)
+                        st.session_state['enriched_data'] = updated
+                        filtered_df = updated
+                    if failed:
+                        st.warning(tr('OMDb stopped responding. Check your key, connection or request quota.',
+                                      'OMDb ha interrotto le richieste. Controlla la chiave, la connessione o la quota.'))
+                    st.caption(tr(f'{processed} checked, scores found for {found}.',
+                                  f'{processed} controllati, punteggi trovati per {found}.'))
 
         affinity_results = calculate_taste_affinity(filtered_df)
-
         if affinity_results['has_user_rating']:
-            col_af1, col_af2, col_af3, col_af4 = st.columns(4)
-            with col_af1:
-                st.metric(t("tab5_affinity_tmdb"), f"{affinity_results['correlation_tmdb']}%")
-            with col_af2:
-                st.metric(t("tab5_affinity_imdb"), f"{affinity_results['correlation_imdb']}%")
-            with col_af3:
-                st.metric(t("tab5_affinity_rt"), f"{affinity_results['correlation_rt']}%")
-            with col_af4:
-                st.metric("Contrarian Divergence", f"±{affinity_results['contrarian_score']} pts")
+            columns = st.columns(4)
+            for column, source in zip(columns, ('tmdb', 'imdb', 'rt')):
+                value = affinity_results[f'correlation_{source}']
+                column.metric(t(f'tab5_affinity_{source}'), f'{value:+.2f}' if value is not None else '—')
+                count = affinity_results['coverage'][source]
+                column.caption(tr(f'{count} matched films', f'{count} film abbinati'))
+            divergence = affinity_results['contrarian_score']
+            columns[3].metric(tr('Mean gap vs TMDb', 'Scarto medio da TMDb'), f'{divergence:.2f} / 10' if divergence is not None else '—')
 
+        if affinity_results['contrarian_score'] is not None:
             st.markdown(
                 f"""
                 <div class="lb-card" style="border-left: 4px solid #FF9B38; margin: 15px 0;">
@@ -1041,7 +1078,7 @@ with tab_ratings:
                 gems = affinity_results['hidden_gems']
                 if not gems.empty:
                     gem_cols = [c for c in ['Name', 'Title', 'Year', 'Rating', 'tmdb_rating', 'delta_tmdb'] if c in gems.columns]
-                    st.dataframe(gems[gem_cols].head(8), use_container_width=True)
+                    render_numbered_table(_prepare_film_table(gems.head(8), gem_cols), use_container_width=True)
                 else:
                     st.info("No extreme hidden gems (films where your score was +1.5 pts above consensus).")
 
@@ -1050,71 +1087,16 @@ with tab_ratings:
                 over = affinity_results['overrated']
                 if not over.empty:
                     over_cols = [c for c in ['Name', 'Title', 'Year', 'Rating', 'tmdb_rating', 'delta_tmdb'] if c in over.columns]
-                    st.dataframe(over[over_cols].head(8), use_container_width=True)
+                    render_numbered_table(_prepare_film_table(over.head(8), over_cols), use_container_width=True)
                 else:
                     st.info("No extreme overrated films (films where your score was -1.5 pts below consensus).")
 
-        else:
+        elif not affinity_results['has_user_rating']:
             st.info(
                 "💡 **Taste Affinity unlocks when you have rated films.**\n\n"
                 "Currently, your dataset doesn't contain enough personal user ratings (e.g. from `ratings.csv` or added via 'Add Movie'). "
                 "Add your ratings using the **Add Movie** page to view your live Taste Affinity profile against TMDb, IMDb, and Rotten Tomatoes!"
             )
-
-# ==============================================================================
-# TAB 6: EXPLORER & LIVE SEARCH
-# ==============================================================================
-with tab_search:
-    st.subheader(f"🔎 {t('tab_search')}",
-    f"🪐 {t('nav_sagas')}")
-
-    search_query = st.text_input(f"🔍 {t('tab6_search_label')}", placeholder=t("tab6_search_placeholder"))
-
-    result_df = filtered_df.copy()
-
-    if search_query:
-        q = search_query.strip().lower()
-        def match_row(row):
-            title = str(row.get('Name') if pd.notna(row.get('Name')) else (row.get('Title') if pd.notna(row.get('Title')) else "")).lower()
-            if q in title:
-                return True
-            if any(q in d.lower() for d in row['clean_directors']):
-                return True
-            if any(q in a.lower() for a in row['clean_actors']):
-                return True
-            if any(q in g.lower() for g in row['clean_genres']):
-                return True
-            return False
-
-        result_df = result_df[result_df.apply(match_row, axis=1)]
-        st.info(f"Found **{len(result_df)}** films matching: *'{search_query}'*")
-
-    display_df = pd.DataFrame()
-    title_series = result_df['Name'] if 'Name' in result_df.columns else pd.Series(index=result_df.index, dtype=object)
-    if 'Title' in result_df.columns:
-        title_series = title_series.fillna(result_df['Title'])
-    display_df['Title'] = title_series.fillna("Untitled")
-    display_df['Year'] = result_df['Year'].fillna(0).astype(int) if 'Year' in result_df.columns else 0
-    if has_user_ratings and 'Rating' in result_df.columns:
-        display_df['Your Rating'] = result_df['Rating'].apply(lambda r: f"{r} ★" if pd.notna(r) else "-")
-    display_df['Physical'] = result_df['physical_copy'].apply(lambda p: "💿 Owned" if p else "—") if 'physical_copy' in result_df.columns else "—"
-    display_df['TMDb Score'] = result_df['tmdb_rating'] if 'tmdb_rating' in result_df.columns else "N/A"
-    display_df['Director'] = result_df['clean_directors'].apply(lambda l: ", ".join(l) if l else "N/A") if 'clean_directors' in result_df.columns else "N/A"
-    display_df['Genres'] = result_df['clean_genres'].apply(lambda l: ", ".join(l) if l else "N/A") if 'clean_genres' in result_df.columns else "N/A"
-    display_df['Main Cast'] = result_df['clean_actors'].apply(lambda l: ", ".join(l[:3]) if l else "N/A") if 'clean_actors' in result_df.columns else "N/A"
-    if 'Letterboxd URI' in result_df.columns:
-        display_df['Letterboxd Link'] = result_df['Letterboxd URI']
-
-    st.dataframe(display_df, use_container_width=True, height=450)
-
-    csv_data = result_df.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label=f"💾 {t('tab6_download_btn')}",
-        data=csv_data,
-        file_name="letterboxd_filtered_statistics.csv",
-        mime="text/csv"
-    )
-
 
 with tab_sagas:
     from services.sagas_view import render_sagas

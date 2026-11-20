@@ -1,6 +1,7 @@
 # services/tmbd_service.py
 import requests
-import time
+import re
+import unicodedata
 import os
 import streamlit as st
 
@@ -135,31 +136,42 @@ def fetch_movie_details_by_id(movie_id, api_key=None):
     except Exception:
         return None
 
+def _title_key(title):
+    text = unicodedata.normalize('NFKC', str(title or '')).casefold()
+    return ' '.join(re.findall(r'[^\W_]+', text))
+
+
+def _release_year(value):
+    match = re.fullmatch(r'([1-9]\d{3})(?:\.0+)?', str(value).strip())
+    return int(match[1]) if match else None
+
+
 def fetch_movie_metadata(title, year, api_key=None):
-    """
-    Search movie by title + year, then retrieve full metadata.
-    """
+    """Enrich a title only when TMDb yields an unambiguous title/year match."""
     key = api_key or get_tmdb_api_key()
-    if not key:
+    title_key = _title_key(title)
+    if not key or not title_key:
         return None
-        
-    search_url = f"{BASE_URL}/search/movie"
-    params = {
-        "api_key": key,
-        "query": title,
-        "year": int(float(year)) if year is not None and str(year).replace('.0', '').isdigit() else None
-    }
-    
+
+    expected_year = _release_year(year)
+    params = {'api_key': key, 'query': title, 'year': expected_year}
     try:
-        res = requests.get(search_url, params=params, timeout=5)
-        if res.status_code != 200:
+        response = requests.get(f'{BASE_URL}/search/movie', params=params, timeout=5)
+        if response.status_code != 200:
             return None
-        data = res.json()
-        results = data.get("results", [])
-        if not results:
+        matches = {}
+        for candidate in response.json().get('results', []):
+            titles = {_title_key(candidate.get('title')), _title_key(candidate.get('original_title'))}
+            release_year = _release_year((candidate.get('release_date') or '')[:4])
+            if (candidate.get('id') is not None and title_key in titles
+                    and (expected_year is None or release_year == expected_year)):
+                matches[candidate['id']] = release_year
+        if len(matches) != 1:
             return None
-            
-        movie_id = results[0]["id"]
-        return fetch_movie_details_by_id(movie_id, key)
-    except Exception:
-        return None
+        movie_id, release_year = next(iter(matches.items()))
+        details = fetch_movie_details_by_id(movie_id, key)
+        if details and (release_year is None or details.get('year') == release_year):
+            return details
+    except (requests.RequestException, ValueError):
+        pass
+    return None

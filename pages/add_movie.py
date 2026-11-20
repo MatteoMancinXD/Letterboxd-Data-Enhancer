@@ -6,7 +6,9 @@ import pandas as pd
 import streamlit as st
 from services.tmbd_service import search_movies, fetch_movie_details_by_id, get_tmdb_api_key
 from services.importer_service import save_dataset
+from services.ratings_service import rating_from_10
 from services.translations import t, localized as tr
+from services.ui_components import styled_rating_slider
 
 ENRICHED_FILE = 'data/letterboxd_enriched.parquet'
 st.title(t('add_movie_title'))
@@ -25,6 +27,13 @@ dialog_options = {'on_dismiss': close_movie_dialog} if 'on_dismiss' in inspect.s
 @st.dialog(tr('Add to your diary', 'Aggiungi al diario'), width='large', **dialog_options)
 def movie_dialog(selected):
     st.subheader(f"{selected['title']} ({selected.get('year') or '—'})")
+    current = st.session_state.get('enriched_data', pd.DataFrame()).copy()
+    # Repeated submissions update the film, preserving its official URI and ownership.
+    ids = pd.to_numeric(current.get('tmdb_id', pd.Series(index=current.index, dtype=float)), errors='coerce')
+    names = current.get('Name', pd.Series(index=current.index, dtype=str)).fillna('').str.casefold()
+    years = pd.to_numeric(current.get('Year', pd.Series(index=current.index, dtype=float)), errors='coerce')
+    match = (ids == selected['tmdb_id']) | ((names == selected['title'].casefold()) & (years == selected.get('year')))
+    existing_review = current.loc[match].iloc[0].get("Review") if match.any() else None
     with st.form(f"movie_entry_{selected['tmdb_id']}"):
         left, right = st.columns([1, 2])
         with left:
@@ -32,23 +41,24 @@ def movie_dialog(selected):
                 st.image(selected['poster_url'], width=160)
             st.caption(', '.join(selected.get('directors', [])))
         with right:
-            rating = st.select_slider(t('add_user_rating_label'), options=[0.0] + [i / 2 for i in range(1, 11)],
-                value=4.0, format_func=lambda v: '—' if v == 0 else f'{v:g} ★')
+            rating = styled_rating_slider(
+                t('add_user_rating_label'),
+                options=list(range(0, 11)),
+                value=8,
+                key=f"rating_add_{selected['tmdb_id']}",
+                format_func=lambda v: '—' if v == 0 else f'{v} ★',
+            )
             watched = st.date_input(t('add_watch_date_label'), value=datetime.date.today())
             physical = st.checkbox(t('add_physical_checkbox'), value=False)
+            review = st.text_area(tr('Your review', 'La tua recensione'),
+                value=existing_review if isinstance(existing_review, str) else '', height=120)
             submitted = st.form_submit_button(t('add_save_button'), type='primary', use_container_width=True)
         if submitted:
-            record = {key: selected.get(key) for key in ('tmdb_id', 'collection_id', 'genres', 'directors',
+            record = {key: selected.get(key) for key in ('tmdb_id', 'collection_id', 'imdb_id', 'genres', 'directors',
                 'actors', 'tmdb_rating', 'runtime', 'poster_path', 'overview', 'production_countries')}
-            record.update(Name=selected['title'], Year=selected.get('year'), Rating=rating or None,
-                Date=watched.isoformat(), physical_copy=physical,
+            record.update(Name=selected['title'], Year=selected.get('year'), Rating=(rating_from_10(rating) if rating else None),
+                Date=watched.isoformat(), physical_copy=physical, Review=review.strip(),
                 **{'Letterboxd URI': f"https://boxd.it/tmdb-{selected['tmdb_id']}"})
-            current = st.session_state.get('enriched_data', pd.DataFrame()).copy()
-            # Repeated submissions update the film, preserving its official URI and ownership.
-            ids = pd.to_numeric(current.get('tmdb_id', pd.Series(index=current.index, dtype=float)), errors='coerce')
-            names = current.get('Name', pd.Series(index=current.index, dtype=str)).fillna('').str.casefold()
-            years = pd.to_numeric(current.get('Year', pd.Series(index=current.index, dtype=float)), errors='coerce')
-            match = (ids == selected['tmdb_id']) | ((names == selected['title'].casefold()) & (years == selected.get('year')))
             if match.any():
                 index = current.index[match][0]
                 old = current.loc[index].to_dict()
@@ -67,7 +77,7 @@ def movie_dialog(selected):
             else:
                 st.session_state['enriched_data'] = updated
                 st.session_state['data_loaded'] = True
-                st.session_state['movie_saved_notice'] = tr('In your diary: ', 'Nel tuo diario: ') + selected['title'] + (f' · {rating:g} ★' if rating else '')
+                st.session_state['movie_saved_notice'] = tr('In your diary: ', 'Nel tuo diario: ') + selected['title'] + (f' · {rating} / 10 ★' if rating else '')
                 close_movie_dialog()
                 st.rerun()
 

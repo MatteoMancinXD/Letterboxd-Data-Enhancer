@@ -49,6 +49,8 @@ Open the local address printed in the terminal, normally `http://localhost:8501`
 
 The interface supports English and Italian. Analysis controls appear in the relevant sections rather than applying a global sidebar filter.
 
+Personal ratings are displayed and edited across the entire interface on a **1–10 integer star scale** (with dynamic color-shifting rating sliders in Add Movie and Personal Movie Space), while `data/letterboxd_enriched.parquet` continues to store Letterboxd's native 0.5–5.0 values for seamless import and export.
+
 ### Importing and updating Letterboxd data
 
 1. Export your data from Letterboxd.
@@ -70,9 +72,11 @@ The library stores one current record per film. It is not a complete event-level
 
 ### Sagas and thematic cycles
 
-Open **Deep Statistics → Sagas & Universes**. The built-in catalog includes franchises, cinematic universes and thematic cycles such as the Dollars Trilogy, Park Chan-wook's Vengeance Trilogy and Three Colours. Thematic cycles have a separate type filter and do not imply shared narrative continuity.
+Open **Deep Statistics → Sagas & Universes**. The built-in curated catalog includes **140+ franchises, cinematic universes, and thematic cycles** (updated through 2026 releases), with a separate type filter for universes, sagas, and thematic cycles that do not imply shared narrative continuity.
 
-Rank by personal rating, TMDb rating, completion, remaining films or rating difference. Personal averages use rated watched films on a five-point scale. TMDb averages use released films with available scores on a ten-point scale, including unwatched films. Coverage is displayed; missing ratings are excluded. The rating difference compares only films rated by both sources after multiplying the personal rating by two.
+The gallery is organized visually with poster cards and expandable chapter details across two tabs: **Completed sagas** (spotlights, favorite and lowest-rated chapters, directors, and a customizable **Top / Flop** average-rating chart defaulting to 10 sagas with an adjustable count and invert toggle) and **Sagas to complete** (showing only sagas you have already started — sagas with 0 watched films are hidden — ranked by recovery priority from your ratings, remaining chapters, or completion percentage).
+
+Personal averages use rated watched films and TMDb averages use released films with available scores (including unwatched films), both displayed on the **10-point scale**. Coverage is displayed, missing ratings are excluded, and the rating difference directly compares films rated by both sources on that shared 1–10 scale.
 
 The collection scan discovers and refreshes TMDb collections across the library. Curated groups can refresh their known film metadata or accept a missing film selected through TMDb search. Matching uses TMDb identifiers when available, then exact normalized titles/aliases and release years to distinguish remakes.
 
@@ -84,7 +88,7 @@ Catalog references include the [official Halloween film list](https://halloweenm
 
 Local data is stored under `data/`:
 
-- `letterboxd_enriched.parquet`: the film library, ratings and physical ownership.
+- `letterboxd_enriched.parquet`: the film library, personal ratings (stored on Letterboxd's native 0.5–5.0 scale and shown as 1–10 integers in the UI) and physical ownership.
 - `tmdb_collections_cache.json`: discovered TMDb collections.
 - `curated_sagas_cache.json`: refreshed metadata and custom additions to curated groups.
 

@@ -29,7 +29,7 @@ class SagaTests(unittest.TestCase):
                                     [dict(Name='One', Year=2020, Rating=5, tmdb_rating=8)])
         self.assertEqual(items[0]['avg_tmdb_rating'], 7)
         self.assertEqual(items[0]['tmdb_ratings_count'], 2)
-        self.assertEqual(items[0]['avg_user_rating'], 5)
+        self.assertEqual(items[0]['avg_user_rating'], 10)
         self.assertEqual(items[0]['taste_gap'], 2)
         self.assertEqual(items[0]['ratings_count'], 1)
 
@@ -145,6 +145,108 @@ class SagaTests(unittest.TestCase):
                 report = svc.scan_and_cache_tmdb_collections(pd.DataFrame([dict(collection_id=10)]))
             self.assertEqual(report['failed'], 1)
             self.assertEqual(before, Path(path).read_bytes())
+
+    def test_visual_metadata_directors_best_film_poster_and_recovery(self):
+        import numpy as np
+        s_complete = saga([
+            film('Chapter 1', year=2010, release_date='2010-01-01', tmdb_rating=7.5),
+            film('Chapter 2', year=2012, release_date='2012-01-01', tmdb_rating=8.2),
+            film('Chapter 3', year=2015, release_date='2015-01-01', tmdb_rating=7.0),
+        ], sid='done_saga')
+        s_partial_high = saga([
+            film('Part 1', year=2018, release_date='2018-01-01', poster_path='/part1.jpg', tmdb_rating=7.8),
+            film('Part 2', year=2020, release_date='2020-01-01', poster_path='/part2.jpg', tmdb_rating=8.1),
+        ], sid='partial_high')
+        s_partial_low = saga([
+            film('Low 1', year=2019, release_date='2019-01-01', tmdb_rating=6.0),
+            film('Low 2', year=2021, release_date='2021-01-01', tmdb_rating=6.5),
+        ], sid='partial_low')
+        library = [
+            dict(Name='Chapter 1', Year=2010, Rating=4.0, directors=np.array(['Dir A']), genres=np.array(['Sci-Fi']), runtime=120, poster_path='/c1.jpg'),
+            dict(Name='Chapter 2', Year=2012, Rating=5.0, directors=['Dir A'], genres=['Sci-Fi', 'Action'], runtime=130, poster_path='/c2.jpg'),
+            dict(Name='Chapter 3', Year=2015, Rating=3.5, directors=['Dir B'], genres=['Action'], runtime=110),
+            dict(Name='Part 1', Year=2018, Rating=4.5, directors=['Dir C'], runtime=105),
+            dict(Name='Low 1', Year=2019, Rating=2.0, directors=['Dir D'], runtime=95),
+        ]
+        _, items = self.compute([s_complete, s_partial_high, s_partial_low], library)
+        by_id = {s['id']: s for s in items}
+
+        done = by_id['done_saga']
+        self.assertEqual(done['poster_url_resolved'], 'https://image.tmdb.org/t/p/w342/c1.jpg')
+        self.assertEqual(done['directors'], ['Dir A', 'Dir B'])
+        self.assertEqual(done['director_counts'], [('Dir A', 2), ('Dir B', 1)])
+        self.assertEqual(done['best_film']['title'], 'Chapter 2')
+        self.assertEqual(done['best_film']['rating'], 10.0)
+        self.assertEqual(done['worst_film']['title'], 'Chapter 3')
+        self.assertEqual(done['worst_film']['rating'], 7.0)
+        self.assertEqual(done['avg_user_rating'], 8.33)
+        self.assertEqual(done['year_span'], '2010–2015')
+        self.assertEqual(done['total_runtime_min'], 360)
+        self.assertIsNone(done['next_to_watch'])
+        self.assertIsNone(done['recovery_score'])
+
+        p_high = by_id['partial_high']
+        p_low = by_id['partial_low']
+        self.assertEqual(p_high['poster_url_resolved'], 'https://image.tmdb.org/t/p/w342/part1.jpg')
+        self.assertEqual(p_high['next_to_watch']['title'], 'Part 2')
+        self.assertIsNone(p_high['worst_film'])
+        self.assertEqual(p_high['avg_user_rating'], 9.0)
+        self.assertIsNotNone(p_high['recovery_score'])
+        self.assertGreater(p_high['recovery_score'], p_low['recovery_score'])
+        self.assertIsNone(p_low['poster_url_resolved'])
+
+    def test_updated_franchises_and_expanded_iconic_catalog(self):
+        self.assertGreaterEqual(len(svc.CURATED_SAGAS), 115)
+        library = pd.DataFrame([
+            dict(Name='The Fantastic 4: First Steps', Year=2025, Rating=4.0),
+            dict(Name='Spider-Man: Brand New Day', Year=2026, Rating=4.5),
+            dict(Name='Avatar: Fire and Ash', Year=2025, Rating=4.0),
+            dict(Name='Godzilla Minus One', Year=2023, Rating=4.5),
+            dict(Name='Godzilla Minus Zero', Year=2026, Rating=4.5),
+            dict(Name='RoboCop', Year=1987, Rating=4.0),
+            dict(Name='Men in Black', Year=1997, Rating=4.0),
+            dict(Name='Bad Boys: Ride or Die', Year=2024, Rating=3.5),
+            dict(Name='Superman', Year=2025, Rating=4.0),
+            dict(Name='The Mandalorian and Grogu', Year=2026, Rating=4.0),
+        ])
+        result = svc.compute_sagas_progress(
+            library,
+            include_tmdb_collections=False,
+            today=datetime.date(2026, 11, 20),
+        )
+        all_items = result['started_sagas'] + result['completed_sagas'] + result['unstarted_sagas']
+        by_id = {s['id']: s for s in all_items}
+
+        self.assertEqual(by_id['mcu']['released_films'], 38)
+        self.assertEqual(by_id['mcu']['upcoming_count'], 1)
+        self.assertEqual(by_id['mcu']['watched_count'], 2)
+
+        self.assertEqual(by_id['avatar_saga']['released_films'], 3)
+        self.assertEqual(by_id['avatar_saga']['watched_count'], 1)
+
+        self.assertEqual(by_id['star_wars_complete']['released_films'], 13)
+        self.assertEqual(by_id['star_wars_complete']['watched_count'], 1)
+
+        self.assertEqual(by_id['mission_impossible']['released_films'], 8)
+        self.assertEqual(by_id['jurassic_park']['released_films'], 7)
+        self.assertEqual(by_id['john_wick']['released_films'], 5)
+        self.assertEqual(by_id['toy_story']['released_films'], 6)
+        self.assertEqual(by_id['hunger_games']['released_films'], 6)
+        self.assertEqual(by_id['alien_universe']['released_films'], 15)
+        self.assertEqual(by_id['dune_saga']['released_films'], 2)
+        self.assertEqual(by_id['dune_saga']['upcoming_count'], 1)
+
+        for sid in (
+            'godzilla_toho', 'king_kong', 'robocop', 'men_in_black',
+            'bad_boys', 'conjuring_universe', 'dcu', 'james_bond_complete', 'kung_fu_panda',
+        ):
+            self.assertIn(sid, by_id)
+
+        self.assertEqual(by_id['godzilla_toho']['watched_count'], 2)
+        self.assertEqual(by_id['robocop']['watched_count'], 1)
+        self.assertEqual(by_id['men_in_black']['watched_count'], 1)
+        self.assertEqual(by_id['bad_boys']['watched_count'], 1)
+        self.assertEqual(by_id['dcu']['watched_count'], 1)
 
 
 if __name__ == '__main__':

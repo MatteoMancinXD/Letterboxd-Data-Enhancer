@@ -6,6 +6,7 @@ import streamlit as st
 from services.translations import t, localized as tr
 from services.tmbd_service import get_tmdb_api_key
 from services.importer_service import load_uploaded_files, compute_dataset_diff, apply_dataset_update
+from services.ratings_service import series_to_10
 
 ENRICHED_FILE = "data/letterboxd_enriched.parquet"
 st.title(f"{t('nav_data_manager')}")
@@ -52,17 +53,25 @@ with upload_tab:
             col.metric(label, count)
         if changes:
             with st.expander(tr("Rating changes: before → after", "Voti modificati: prima → dopo"), expanded=True):
-                preview = pd.DataFrame(changes).rename(columns={
+                preview_raw = pd.DataFrame(changes)
+                for col in ('Previous rating', 'New rating'):
+                    if col in preview_raw.columns:
+                        preview_raw[col] = series_to_10(preview_raw[col])
+                preview = preview_raw.rename(columns={
                     'Name': tr('Film', 'Film'), 'Year': tr('Year', 'Anno'),
-                    'Previous rating': tr('Previous rating / 5', 'Voto precedente / 5'),
-                    'New rating': tr('New rating / 5', 'Voto attuale / 5')})
+                    'Previous rating': tr('Previous rating / 10', 'Voto precedente / 10'),
+                    'New rating': tr('New rating / 10', 'Voto attuale / 10')})
                 st.dataframe(preview, hide_index=True, use_container_width=True)
                 st.caption(tr("An empty value means unrated.", "Un valore vuoto indica un voto assente."))
         for label, frame in [(tr("Films to add", "Film da aggiungere"), added),
                              (tr("Films to remove", "Film da rimuovere"), deleted)]:
             if not frame.empty:
                 with st.expander(label):
-                    st.dataframe(frame[[c for c in ['Name', 'Year', 'Rating'] if c in frame]], hide_index=True)
+                    view = frame[[c for c in ['Name', 'Year', 'Rating'] if c in frame]].copy()
+                    if 'Rating' in view.columns:
+                        view['Rating'] = series_to_10(view['Rating'])
+                        view = view.rename(columns={'Rating': tr('Rating / 10', 'Voto / 10')})
+                    st.dataframe(view, hide_index=True)
         if not len(added) and not len(deleted) and not changes:
             st.info(tr("No film or rating changes. Synchronizing still applies supplied dates.",
                        "Nessuna modifica a film o voti. La sincronizzazione applica comunque le date fornite."))
@@ -95,7 +104,11 @@ with inspect_tab:
     else:
         st.caption(tr("Technical view of the saved dataset. Browse films in Personal Movie Space.",
                       "Vista tecnica dei dati salvati. Per consultare i film usa lo Spazio personale."))
-        st.dataframe(existing, hide_index=True, use_container_width=True)
+        inspect_df = existing.copy()
+        if 'Rating' in inspect_df.columns:
+            inspect_df['Rating'] = series_to_10(inspect_df['Rating'])
+            inspect_df = inspect_df.rename(columns={'Rating': 'Rating (/10)'})
+        st.dataframe(inspect_df, hide_index=True, use_container_width=True)
 
 with backup_tab:
     if not existing.empty:

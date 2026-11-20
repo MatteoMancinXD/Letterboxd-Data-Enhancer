@@ -2,11 +2,18 @@
 import re
 import pandas as pd
 import numpy as np
+from services.ratings_service import rating_to_10, format_rating_10
 
-# Comprehensive registry of iconic Oscar, Cannes, and Venice winners
+# Curated, partial registry of Oscar, Cannes, and Venice recognitions
 # Keyed by standardized lower-case title
 AWARDS_REGISTRY = {
     # --- 2020s ---
+    "one battle after another": {
+        "year": 2025,
+        "oscars": ["Best Picture (2026)", "Directing", "Supporting Actor (Sean Penn)",
+                   "Casting", "Film Editing", "Adapted Screenplay"],
+        "source_url": "https://www.oscars.org/oscars/ceremonies/2026",
+    },
     "anora": {"year": 2024, "cannes": ["Palme d'Or (2024)"]},
     "the room next door": {"year": 2024, "venice": ["Golden Lion (2024)"]},
     "oppenheimer": {"year": 2023, "oscars": ["Best Picture (2024)", "Best Director", "Best Actor", "Best Supp. Actor"]},
@@ -283,7 +290,7 @@ def clean_title_for_lookup(title):
     t = re.sub(r'\s+', ' ', t).strip()
     return t
 
-def match_awards_for_film(title, year=None):
+def match_awards_for_film(title, year=None, *, exact_year=False):
     """
     Checks if a film title & year matches our prestigious awards registry.
     Returns: dict with 'has_awards', 'oscars', 'cannes', 'venice', 'all_awards', 'festivals'
@@ -308,8 +315,11 @@ def match_awards_for_film(title, year=None):
     if not match_entry:
         return None
 
-    # Check year if available (allow delta of 2 years for festival vs release vs oscar)
-    if year and pd.notna(year) and str(year).isdigit():
+    # Film details require a release year match to avoid attributing awards to remakes.
+    if exact_year:
+        if not str(year).isdigit() or int(year) != match_entry.get("year"):
+            return None
+    elif year and pd.notna(year) and str(year).isdigit():
         y = int(year)
         ref_year = match_entry.get("year")
         if ref_year and abs(y - ref_year) > 2:
@@ -337,6 +347,7 @@ def match_awards_for_film(title, year=None):
         "cannes": cannes,
         "venice": venice,
         "all_awards": all_awards,
+        "source_url": match_entry.get("source_url"),
         "festivals": festivals,
         "badge_str": " | ".join(all_awards[:2])
     }
@@ -345,8 +356,8 @@ def compute_awards_analytics(df):
     """
     Computes comprehensive awards statistics across the user's movie library.
     Identifies:
-    - Liked / Agreed Winners (user rating >= 4.0 stars / 8.0/10)
-    - Disliked / Overrated Winners (user rating <= 2.5 stars / < 6.0/10)
+    - Liked / Agreed Winners (user rating >= 8/10)
+    - Disliked / Overrated Winners (user rating < 6/10)
     - Neutral Winners
     - Metrics for Oscars vs Cannes vs Venice
     """
@@ -392,7 +403,7 @@ def compute_awards_analytics(df):
             matched_records.append({
                 "Title": title,
                 "Year": int(year) if pd.notna(year) and str(year).replace('.0','').isdigit() else 0,
-                "Your Rating": f"{personal_rating} ★" if pd.notna(personal_rating) else "-",
+                "Your Rating": format_rating_10(rating_to_10(personal_rating), suffix=" / 10 ★", unrated="-"),
                 "Personal_Score": score,
                 "TMDb Score": tmdb_score,
                 "Directors": ", ".join(dirs) if dirs else "N/A",

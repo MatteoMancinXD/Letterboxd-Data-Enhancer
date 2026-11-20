@@ -24,5 +24,6 @@ Thumbs.db
 data/*.parquet*
 data/tmdb_collections_cache.json
 data/curated_sagas_cache.json
+data/overview_posters.json
 *.parquet
 *.bak
